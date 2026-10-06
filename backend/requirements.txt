@@ -1,0 +1,14 @@
+# Core framework
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# Settings / env
+pydantic-settings==2.4.0
+
+# Computer vision (foundation only — not used yet)
+opencv-python==4.10.0.84
+
+# Testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2
