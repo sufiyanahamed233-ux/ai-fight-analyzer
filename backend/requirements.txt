@@ -5,8 +5,12 @@ uvicorn[standard]==0.30.6
 # Settings / env
 pydantic-settings==2.4.0
 
-# Computer vision (foundation only — not used yet)
+# Computer vision
 opencv-python==4.10.0.84
+ultralytics>=8.4.0          # YOLO pose estimation (downloads model weights on first use)
+# torch and torchvision are intentionally omitted from pip-managed deps:
+# install the CUDA-specific wheel manually, e.g.:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
 
 # Testing
 pytest==8.3.3
