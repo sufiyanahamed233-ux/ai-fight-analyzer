@@ -137,6 +137,7 @@ def main() -> None:
     print(f"Frames with detected person: {detected_count} ({detected_count / max(1, processed_count) * 100:.1f}%)")
     print(f"Frames without detected person: {undetected_count} ({undetected_count / max(1, processed_count) * 100:.1f}%)")
     print(f"Sequence duration: {sequence.duration:.2f} seconds")
+    print(f"Timestamp source: {sequence.timestamp_source}")
     print(f"Total processing wall time: {total_processing_time:.3f} seconds")
     print(f"Average processing time per frame: {avg_ms_per_frame:.2f} ms")
     print(f"Processing FPS: {processing_fps:.1f} FPS")

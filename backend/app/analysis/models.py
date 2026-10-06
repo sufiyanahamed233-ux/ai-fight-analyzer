@@ -38,6 +38,7 @@ class PoseSequence:
     frame_count: int
     duration: float  # duration in seconds
     frames: List[PoseFrame] = field(default_factory=list)
+    timestamp_source: str = "video_fps_fallback"  # "manifest" | "video_fps_fallback"
 
     @property
     def detected_frames_count(self) -> int:

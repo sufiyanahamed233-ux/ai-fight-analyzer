@@ -2,14 +2,31 @@
 
 Mocks PoseDetector and OpenCV VideoCapture so tests execute fast, deterministically,
 and without any physical camera, video file, or GPU requirements.
+
+Manifest timestamp tests are in the ``TestManifestTimestamps`` class and cover:
+- valid manifest (timestamps normalised, source=="manifest", duration from manifest)
+- missing manifest (FPS fallback, source=="video_fps_fallback")
+- malformed manifest – bad JSON (FPS fallback)
+- malformed manifest – missing key (FPS fallback)
+- malformed manifest – non-numeric entries (FPS fallback)
+- mismatched manifest – fewer timestamps than frames (FPS fallback for overflow frames)
 """
 
+import json
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
 import numpy as np
 import pytest
 
 from app.analysis.models import PoseFrame, PoseSequence
-from app.analysis.pose_sequence import PoseSequenceAnalyzer
+from app.analysis.pose_sequence import (
+    TS_SOURCE_FPS,
+    TS_SOURCE_MANIFEST,
+    PoseSequenceAnalyzer,
+    _load_timestamps,
+)
 from app.pose.pose_detector import (
     COCO_KEYPOINT_NAMES,
     DetectionResult,
@@ -17,6 +34,11 @@ from app.pose.pose_detector import (
     PoseDetector,
     PoseResult,
 )
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
 
 
 def create_dummy_keypoints(offset: float = 0.0) -> list[Keypoint]:
@@ -102,6 +124,11 @@ class MockVideoCapture:
 
     def release(self):
         self.released = True
+
+
+# ---------------------------------------------------------------------------
+# Original integration tests (unchanged behaviour)
+# ---------------------------------------------------------------------------
 
 
 def test_process_video_successful_sequence():
@@ -234,3 +261,270 @@ def test_keypoint_coordinates_preserved():
     assert kp.x_norm == pytest.approx(expected_kp.x_norm)
     assert kp.y_norm == pytest.approx(expected_kp.y_norm)
     assert kp.confidence == pytest.approx(expected_kp.confidence)
+
+
+# ---------------------------------------------------------------------------
+# _load_timestamps unit tests (no video needed)
+# ---------------------------------------------------------------------------
+
+
+class TestLoadTimestamps:
+    """Unit tests for the _load_timestamps() helper."""
+
+    def test_no_manifest_returns_none_fps_source(self, tmp_path):
+        """When no manifest file exists the helper returns (None, 'video_fps_fallback')."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        ts, source = _load_timestamps(str(video))
+        assert ts is None
+        assert source == TS_SOURCE_FPS
+
+    def test_valid_manifest_returns_timestamps_manifest_source(self, tmp_path):
+        """A well-formed manifest is loaded and source is 'manifest'."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text(
+            json.dumps({"timestamps_s": [1.0, 1.033, 1.066]}),
+            encoding="utf-8",
+        )
+        ts, source = _load_timestamps(str(video))
+        assert ts == pytest.approx([1.0, 1.033, 1.066])
+        assert source == TS_SOURCE_MANIFEST
+
+    def test_bad_json_returns_none_fps_source(self, tmp_path):
+        """A manifest with invalid JSON triggers FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text("{ not valid json !!!}", encoding="utf-8")
+        ts, source = _load_timestamps(str(video))
+        assert ts is None
+        assert source == TS_SOURCE_FPS
+
+    def test_missing_key_returns_none_fps_source(self, tmp_path):
+        """A manifest missing 'timestamps_s' triggers FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text(json.dumps({"role": "front"}), encoding="utf-8")
+        ts, source = _load_timestamps(str(video))
+        assert ts is None
+        assert source == TS_SOURCE_FPS
+
+    def test_empty_timestamps_list_returns_none_fps_source(self, tmp_path):
+        """An empty 'timestamps_s' list triggers FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text(json.dumps({"timestamps_s": []}), encoding="utf-8")
+        ts, source = _load_timestamps(str(video))
+        assert ts is None
+        assert source == TS_SOURCE_FPS
+
+    def test_non_numeric_entries_returns_none_fps_source(self, tmp_path):
+        """Non-numeric entries in 'timestamps_s' trigger FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text(
+            json.dumps({"timestamps_s": [0.0, "bad", 0.066]}),
+            encoding="utf-8",
+        )
+        ts, source = _load_timestamps(str(video))
+        assert ts is None
+        assert source == TS_SOURCE_FPS
+
+
+# ---------------------------------------------------------------------------
+# Manifest timestamp integration tests (process_video)
+# ---------------------------------------------------------------------------
+
+
+class TestManifestTimestamps:
+    """Integration tests for timestamp resolution inside process_video()."""
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _make_detector(n: int = 3) -> MagicMock:
+        d = MagicMock(spec=PoseDetector)
+        d.detect.side_effect = [
+            create_mock_detection_result(detected=True) for _ in range(n)
+        ]
+        return d
+
+    # ------------------------------------------------------------------
+    # Valid manifest
+    # ------------------------------------------------------------------
+
+    def test_valid_manifest_timestamps_normalised_to_zero(self, tmp_path):
+        """Frames use manifest timestamps normalised so first == 0.0."""
+        video = tmp_path / "front_20261006T182132.avi"
+        video.touch()
+
+        # Simulate real monotonic timestamps (non-zero first value)
+        raw = [10.0, 10.033, 10.066]
+        manifest = tmp_path / "front_20261006T182132_timestamps.json"
+        manifest.write_text(json.dumps({"timestamps_s": raw}), encoding="utf-8")
+
+        mock_cap = MockVideoCapture(num_frames=3, fps=30.0)
+        detector = self._make_detector(3)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            analyzer = PoseSequenceAnalyzer(detector=detector)
+            seq = analyzer.process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_MANIFEST
+        assert seq.frames[0].timestamp == pytest.approx(0.0)
+        assert seq.frames[1].timestamp == pytest.approx(0.033, abs=1e-6)
+        assert seq.frames[2].timestamp == pytest.approx(0.066, abs=1e-6)
+
+    def test_valid_manifest_duration_from_manifest(self, tmp_path):
+        """Sequence duration is derived from the manifest span, not FPS."""
+        video = tmp_path / "front_20261006T182132.avi"
+        video.touch()
+
+        raw = [5.0, 5.050, 5.110]  # 0.110-second span
+        manifest = tmp_path / "front_20261006T182132_timestamps.json"
+        manifest.write_text(json.dumps({"timestamps_s": raw}), encoding="utf-8")
+
+        mock_cap = MockVideoCapture(num_frames=3, fps=30.0)
+        detector = self._make_detector(3)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        expected_duration = raw[-1] - raw[0]
+        assert seq.duration == pytest.approx(expected_duration, abs=1e-9)
+        assert seq.timestamp_source == TS_SOURCE_MANIFEST
+
+    def test_valid_manifest_source_reported(self, tmp_path):
+        """timestamp_source is 'manifest' when manifest is successfully used."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        manifest = tmp_path / "clip_timestamps.json"
+        manifest.write_text(json.dumps({"timestamps_s": [0.0, 0.033, 0.066]}), encoding="utf-8")
+
+        mock_cap = MockVideoCapture(num_frames=3, fps=30.0)
+        detector = self._make_detector(3)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_MANIFEST
+
+    # ------------------------------------------------------------------
+    # Missing manifest → FPS fallback
+    # ------------------------------------------------------------------
+
+    def test_missing_manifest_uses_fps_fallback(self, tmp_path):
+        """When no manifest exists, timestamps fall back to frame_index/fps."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        # Deliberately do NOT create a manifest file.
+
+        fps = 25.0
+        mock_cap = MockVideoCapture(num_frames=3, fps=fps)
+        detector = self._make_detector(3)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_FPS
+        for i, frame in enumerate(seq.frames):
+            assert frame.timestamp == pytest.approx(i / fps, rel=1e-6)
+
+    # ------------------------------------------------------------------
+    # Malformed manifests → FPS fallback
+    # ------------------------------------------------------------------
+
+    def test_malformed_bad_json_uses_fps_fallback(self, tmp_path):
+        """Bad JSON in manifest → FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        (tmp_path / "clip_timestamps.json").write_text("not json", encoding="utf-8")
+
+        fps = 30.0
+        mock_cap = MockVideoCapture(num_frames=2, fps=fps)
+        detector = self._make_detector(2)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_FPS
+        assert seq.frames[0].timestamp == pytest.approx(0.0)
+        assert seq.frames[1].timestamp == pytest.approx(1 / fps, rel=1e-6)
+
+    def test_malformed_missing_key_uses_fps_fallback(self, tmp_path):
+        """Manifest without 'timestamps_s' key → FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        (tmp_path / "clip_timestamps.json").write_text(
+            json.dumps({"role": "front", "frame_count": 3}),
+            encoding="utf-8",
+        )
+
+        fps = 30.0
+        mock_cap = MockVideoCapture(num_frames=2, fps=fps)
+        detector = self._make_detector(2)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_FPS
+
+    def test_malformed_non_numeric_entries_uses_fps_fallback(self, tmp_path):
+        """Non-numeric timestamps_s entries → FPS fallback."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+        (tmp_path / "clip_timestamps.json").write_text(
+            json.dumps({"timestamps_s": [0.0, "oops", 0.066]}),
+            encoding="utf-8",
+        )
+
+        fps = 30.0
+        mock_cap = MockVideoCapture(num_frames=2, fps=fps)
+        detector = self._make_detector(2)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        assert seq.timestamp_source == TS_SOURCE_FPS
+
+    # ------------------------------------------------------------------
+    # Mismatched manifest (fewer timestamps than frames)
+    # ------------------------------------------------------------------
+
+    def test_mismatched_manifest_overflow_frames_use_fps(self, tmp_path):
+        """Frames beyond manifest length fall back to FPS timestamps while
+        frames within the manifest use normalised manifest timestamps."""
+        video = tmp_path / "clip.avi"
+        video.touch()
+
+        # Manifest only covers 2 of the 4 frames
+        raw = [5.0, 5.040]
+        (tmp_path / "clip_timestamps.json").write_text(
+            json.dumps({"timestamps_s": raw}),
+            encoding="utf-8",
+        )
+
+        fps = 30.0
+        mock_cap = MockVideoCapture(num_frames=4, fps=fps)
+        detector = self._make_detector(4)
+
+        with patch("cv2.VideoCapture", return_value=mock_cap):
+            seq = PoseSequenceAnalyzer(detector=detector).process_video(str(video))
+
+        # Manifest was loaded → source is "manifest"
+        assert seq.timestamp_source == TS_SOURCE_MANIFEST
+
+        # Frames 0-1: use normalised manifest timestamps
+        assert seq.frames[0].timestamp == pytest.approx(0.0)
+        assert seq.frames[1].timestamp == pytest.approx(0.040, abs=1e-9)
+
+        # Frames 2-3: beyond manifest length → fps fallback
+        assert seq.frames[2].timestamp == pytest.approx(2 / fps, rel=1e-6)
+        assert seq.frames[3].timestamp == pytest.approx(3 / fps, rel=1e-6)
