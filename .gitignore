@@ -1,0 +1,24 @@
+# Virtual environments
+.venv/
+backend/.venv/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Model weights
+*.pt
+*.onnx
+*.engine
+
+# Temporary recordings and sample assets
+recordings/
+backend/recordings/
+backend/samples/
+*.avi
+*.mp4
+
+# Environment configs
+.env
