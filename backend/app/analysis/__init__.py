@@ -14,8 +14,10 @@ from app.analysis.models import (
     TorsoRotationFeatures,
     WristFeatures,
 )
+from app.analysis.fight_observer import FightObservationAnalyzer
 from app.analysis.movement_features import MovementFeaturesAnalyzer
 from app.analysis.pose_sequence import PoseSequenceAnalyzer
+from app.schemas.analysis import CategoryObservation, FightObservationResult
 
 __all__ = [
     "PoseFrame",
@@ -23,6 +25,9 @@ __all__ = [
     "PoseSequenceAnalyzer",
     "MovementFeatures",
     "MovementFeaturesAnalyzer",
+    "FightObservationAnalyzer",
+    "FightObservationResult",
+    "CategoryObservation",
     "DetectionCoverageFeatures",
     "StanceFeatures",
     "TorsoHipFeatures",
