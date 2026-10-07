@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import type {
   CategoryObservation,
   FightObservationResult,
@@ -83,6 +83,21 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({
   onNext,
   onReset,
 }) => {
+  const hasOverall =
+    result?.overall_score !== null &&
+    result?.overall_score !== undefined &&
+    !isNaN(result.overall_score);
+  const overallVal = hasOverall ? result!.overall_score! : null;
+
+  // Automatically transition to Fighter Reveal after ~5 seconds if a valid overall score exists
+  useEffect(() => {
+    if (!hasOverall) return;
+    const timer = setTimeout(() => {
+      onNext();
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [hasOverall, onNext]);
+
   if (!result) {
     return (
       <div className="w-full flex-1 flex flex-col items-center justify-center text-center px-4 py-8">
@@ -99,10 +114,6 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({
       </div>
     );
   }
-
-  const hasOverall =
-    result.overall_score !== null && !isNaN(result.overall_score);
-  const overallVal = hasOverall ? result.overall_score! : null;
 
   return (
     <div className="w-full flex-1 flex flex-col items-stretch justify-between px-2 sm:px-6 py-3 max-w-6xl mx-auto overflow-y-auto select-none">
@@ -195,13 +206,6 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({
             className="px-4 py-2.5 rounded-lg text-xs font-mono font-semibold tracking-wider bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-white transition-colors cursor-pointer"
           >
             Reset ↺
-          </button>
-          <button
-            type="button"
-            onClick={onNext}
-            className="px-6 py-2.5 rounded-lg text-xs font-mono font-bold tracking-wider bg-red-600 hover:bg-red-500 text-white transition-all shadow-[0_0_20px_rgba(220,38,38,0.4)] cursor-pointer"
-          >
-            Fighter Reveal →
           </button>
         </div>
       </div>
