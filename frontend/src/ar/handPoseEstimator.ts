@@ -128,15 +128,15 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
     if (!lms || lms.length < 18) continue;
 
     // Key landmarks
-    const wrist     = lm(lms[0]);
-    const thumb1    = lm(lms[1]);
-    const thumb4    = lm(lms[4]);
-    const indexMcp  = lm(lms[5]);
-    const indexTip  = lm(lms[8]);
+    const wrist = lm(lms[0]);
+    const thumb1 = lm(lms[1]);
+    const thumb4 = lm(lms[4]);
+    const indexMcp = lm(lms[5]);
+    const indexTip = lm(lms[8]);
     const middleMcp = lm(lms[9]);
-    const ringMcp   = lm(lms[13]);
-    const pinkyMcp  = lm(lms[17]);
-    const pinkyTip  = lm(lms[20]);
+    const ringMcp = lm(lms[13]);
+    const pinkyMcp = lm(lms[17]);
+    const pinkyTip = lm(lms[20]);
 
     // ── Build hand local frame ──────────────────────────────────────────────
 
@@ -239,7 +239,7 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
 
   // Two hands: pick the one with side='left' for left, side='right' for right.
   // If both claim the same side (unlikely but possible), use screen position.
-  const leftPose  = poses.find(p => p.side === 'left')  ?? null;
+  const leftPose = poses.find(p => p.side === 'left') ?? null;
   const rightPose = poses.find(p => p.side === 'right') ?? null;
 
   // If both claim the same side, split by x position
@@ -250,7 +250,7 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
   // Both claimed same side — split by anchor x (left = lower x in mirrored space)
   const [a, b] = poses.sort((pa, pb) => pa.anchorNorm.x - pb.anchorNorm.x);
   return {
-    left:  { ...a, side: 'left' },
+    left: { ...a, side: 'left' },
     right: { ...b, side: 'right' },
   };
 }

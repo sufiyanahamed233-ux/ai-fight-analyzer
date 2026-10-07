@@ -95,7 +95,14 @@ export function useARGloveOverlay(
 
     if (isWebGLAvailable()) {
       try {
-        arRenderer = new ARGloveRenderer(canvas);
+        arRenderer = new ARGloveRenderer(canvas, (loadErr) => {
+          console.warn('[ARGlove] GLB model failed to load, falling back to 2D PNG:', loadErr);
+          using3D = false;
+          if (arRenderer) {
+            arRenderer.dispose();
+            arRenderer = null;
+          }
+        });
         using3D    = true;
         console.info('[ARGlove] Using Three.js 3D renderer.');
       } catch (e) {
