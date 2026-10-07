@@ -1,11 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import {
-  createHandLandmarker,
-  extractWristCoordinates,
-  normToCanvas,
-} from '../services/handTracker.ts';
-import type { GloveData } from '../services/handTracker.ts';
-import type { HandLandmarker } from '@mediapipe/tasks-vision';
+import { useARGloveOverlay } from '../ar/useARGloveOverlay';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,263 +50,6 @@ function cameraErrorMessage(state: CameraState): string {
     default:
       return 'An unexpected error occurred with the camera.';
   }
-}
-
-// ---------------------------------------------------------------------------
-// Realistic Glove Assets
-// ---------------------------------------------------------------------------
-
-// Preload high-resolution photorealistic boxing glove image assets once
-const leftGloveAsset = new Image();
-leftGloveAsset.src = '/assets/gloves/boxing-glove-left.png';
-
-const rightGloveAsset = new Image();
-rightGloveAsset.src = '/assets/gloves/boxing-glove-right.png';
-
-// ---------------------------------------------------------------------------
-// Glove overlay hook with Real-Time MediaPipe Hand Tracking
-// ---------------------------------------------------------------------------
-
-/**
- * Manages the real-time hand-tracking loop and canvas overlay.
- *
- * - Tracks left and right hands via MediaPipe HandLandmarker.
- * - Smooth position + orientation angle + scale using velocity-adaptive exponential smoothing.
- * - Renders photorealistic combat-sports boxing glove graphic assets over actual fists.
- * - Cleans up on unmount or completion: cancels rAF, closes MediaPipe, disconnects ResizeObserver.
- */
-function useGloveOverlay(
-  canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  containerRef: React.RefObject<HTMLDivElement | null>,
-  videoRef: React.RefObject<HTMLVideoElement | null>,
-  active: boolean,
-): void {
-  useEffect(() => {
-    if (!active) {
-      const canvas = canvasRef.current;
-      if (canvas) {
-        const ctx = canvas.getContext('2d');
-        if (ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
-      return;
-    }
-
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    const video = videoRef.current;
-    if (!canvas || !container || !video) return;
-
-    let animId: number;
-    let isCancelled = false;
-    let landmarker: HandLandmarker | null = null;
-    let lastVideoTime = -1;
-    let lastLandmarkerTimestamp = 0;
-
-    // Smoothed state: position + angle + scale for each glove.
-    const state = {
-      left: {
-        current: { x: 0.65, y: 0.55 },
-        target:  { x: 0.65, y: 0.55 },
-        angleCurrent: 0,
-        angleTarget:  0,
-        scaleCurrent: 160,
-        scaleTarget:  160,
-        lastSeen: 0,
-        hasEverBeenSeen: false,
-      },
-      right: {
-        current: { x: 0.35, y: 0.55 },
-        target:  { x: 0.35, y: 0.55 },
-        angleCurrent: 0,
-        angleTarget:  0,
-        scaleCurrent: 160,
-        scaleTarget:  160,
-        lastSeen: 0,
-        hasEverBeenSeen: false,
-      },
-    };
-
-    const syncCanvasSize = () => {
-      const { width, height } = container.getBoundingClientRect();
-      if (canvas.width !== Math.round(width) || canvas.height !== Math.round(height)) {
-        canvas.width  = Math.round(width);
-        canvas.height = Math.round(height);
-      }
-    };
-
-    syncCanvasSize();
-    const observer = new ResizeObserver(syncCanvasSize);
-    observer.observe(container);
-
-    // Asynchronously instantiate MediaPipe HandLandmarker
-    createHandLandmarker()
-      .then((tracker) => {
-        if (isCancelled) {
-          tracker.close();
-          return;
-        }
-        landmarker = tracker;
-      })
-      .catch((err) => {
-        console.error('Failed to initialize MediaPipe HandLandmarker:', err);
-      });
-
-    const loop = () => {
-      if (isCancelled) return;
-
-      const now = performance.now();
-
-      // Run inference whenever the video has fresh frame data
-      if (
-        landmarker &&
-        video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
-        !video.paused &&
-        video.videoWidth > 0 &&
-        video.videoHeight > 0
-      ) {
-        if (video.currentTime !== lastVideoTime) {
-          lastVideoTime = video.currentTime;
-          try {
-            const timestamp = Math.max(now, lastLandmarkerTimestamp + 1);
-            lastLandmarkerTimestamp = timestamp;
-
-            const results = landmarker.detectForVideo(video, timestamp);
-            const tracked = extractWristCoordinates(
-              results,
-              canvas.width,
-              canvas.height,
-              video.videoWidth,
-              video.videoHeight,
-            );
-
-            const applyGloveData = (g: typeof state.left, data: GloveData) => {
-              if (!g.hasEverBeenSeen) {
-                g.current = { ...data.norm };
-                g.angleCurrent = data.angleDeg;
-                g.scaleCurrent = data.handSpanPx * 2.85;
-                g.hasEverBeenSeen = true;
-              }
-              g.target = { ...data.norm };
-              g.angleTarget = data.angleDeg;
-              g.scaleTarget = data.handSpanPx * 2.85;
-              g.lastSeen = now;
-            };
-
-            if (tracked.left)  applyGloveData(state.left,  tracked.left);
-            if (tracked.right) applyGloveData(state.right, tracked.right);
-
-          } catch (detectionErr) {
-            console.warn('MediaPipe detection frame error:', detectionErr);
-          }
-        }
-      }
-
-      // Shortest-path angle lerp (avoids spinning through 360)
-      const lerpAngle = (cur: number, tgt: number, alpha: number) => {
-        let diff = tgt - cur;
-        while (diff >  180) diff -= 360;
-        while (diff < -180) diff += 360;
-        return cur + diff * alpha;
-      };
-
-      // Velocity-adaptive exponential smoothing for position + angle + scale
-      const smoothGlove = (g: typeof state.left) => {
-        if (!g.hasEverBeenSeen) return;
-        const dx = g.target.x - g.current.x;
-        const dy = g.target.y - g.current.y;
-        const dist = Math.hypot(dx, dy);
-
-        // Velocity-adaptive smoothing for position (responsive yet jitter-free)
-        const alpha = Math.min(0.88, Math.max(0.42, 0.42 + dist * 2.6));
-        g.current.x += dx * alpha;
-        g.current.y += dy * alpha;
-
-        // Smooth angle
-        const alphaA = Math.min(0.75, Math.max(0.35, 0.35 + dist * 2.0));
-        g.angleCurrent = lerpAngle(g.angleCurrent, g.angleTarget, alphaA);
-
-        // Smooth scale to eliminate depth flicker
-        const alphaS = 0.35;
-        g.scaleCurrent += (g.scaleTarget - g.scaleCurrent) * alphaS;
-      };
-
-      smoothGlove(state.left);
-      smoothGlove(state.right);
-
-      // Render realistic glove graphic overlay on canvas
-      const ctx = canvas.getContext('2d');
-      if (ctx && canvas.width > 0 && canvas.height > 0) {
-        const { width, height } = canvas;
-        ctx.clearRect(0, 0, width, height);
-
-        const vW = video.videoWidth || width;
-        const vH = video.videoHeight || height;
-
-        const minGloveH = Math.min(width, height) * 0.16;
-        const maxGloveH = Math.min(width, height) * 0.65;
-
-        const renderRealisticGlove = (
-          g: typeof state.left,
-          asset: HTMLImageElement,
-        ) => {
-          if (!g.hasEverBeenSeen || now - g.lastSeen > 400) return;
-          if (!asset.complete || asset.naturalWidth === 0) return;
-
-          const coords = normToCanvas(g.current, width, height, vW, vH);
-          const gloveH = Math.min(maxGloveH, Math.max(minGloveH, g.scaleCurrent));
-          const aspect = asset.naturalWidth / asset.naturalHeight;
-          const gloveW = gloveH * aspect;
-
-          ctx.save();
-          ctx.translate(coords.cx, coords.cy);
-          ctx.rotate((g.angleCurrent * Math.PI) / 180);
-
-          // Subtle realistic contact drop shadow
-          ctx.shadowColor = 'rgba(0, 0, 0, 0.38)';
-          ctx.shadowBlur = Math.round(gloveH * 0.08);
-          ctx.shadowOffsetX = 0;
-          ctx.shadowOffsetY = Math.round(gloveH * 0.04);
-
-          // Draw the realistic combat-sports glove asset.
-          // Knuckles sit over the fist (top of asset), cuff visually connects to wrist.
-          ctx.drawImage(
-            asset,
-            -gloveW / 2,
-            -gloveH * 0.52,
-            gloveW,
-            gloveH,
-          );
-
-          ctx.restore();
-        };
-
-        renderRealisticGlove(state.left, leftGloveAsset);
-        renderRealisticGlove(state.right, rightGloveAsset);
-      }
-
-      animId = requestAnimationFrame(loop);
-    };
-
-    animId = requestAnimationFrame(loop);
-
-    return () => {
-      isCancelled = true;
-      cancelAnimationFrame(animId);
-      observer.disconnect();
-      if (landmarker) {
-        try {
-          landmarker.close();
-        } catch {
-          // ignore close errors on unmount
-        }
-        landmarker = null;
-      }
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-      }
-    };
-  }, [active, canvasRef, containerRef, videoRef]);
 }
 
 // ---------------------------------------------------------------------------
@@ -401,9 +138,9 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   }, []);
 
   // -------------------------------------------------------------------------
-  // Glove canvas overlay (active only when camera is ready and fight has not ended)
+  // AR Glove canvas overlay (Three.js WebGL with 2D PNG fallback)
   // -------------------------------------------------------------------------
-  useGloveOverlay(
+  useARGloveOverlay(
     canvasRef,
     viewportRef,
     videoRef,
@@ -495,7 +232,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
       {/* ── Camera Viewport ── */}
       {/*
-        ref={viewportRef} is used by useGloveOverlay's ResizeObserver to
+        ref={viewportRef} is used by useARGloveOverlay's ResizeObserver to
         keep the canvas bitmap dimensions in sync with layout.
       */}
       <div
@@ -520,7 +257,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
           ── Canvas Glove Overlay ──
           - absolute + inset-0 → same bounds as the video.
           - pointer-events: none → never blocks interaction.
-          - The bitmap size is kept in sync via useGloveOverlay / ResizeObserver.
+          - The bitmap size is kept in sync via useARGloveOverlay / ResizeObserver.
           - Only visible when camera is ready.
         */}
         <canvas
