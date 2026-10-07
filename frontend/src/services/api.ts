@@ -1,157 +1,73 @@
-import type { BatchAnalysisResult, InvestigationBatchResult, ScanResult } from '../types/api'
+import {
+  CalibrationStatus,
+  type CalibrationResponse,
+  type IApiService,
+} from '../types/calibration.ts';
+import { mockApiService } from './mockApi.ts';
 
-const API_BASE_URL = 'http://127.0.0.1:8000/api'
+// Configurable backend configuration via Vite environment variables
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
-export class ApiError extends Error {
-  readonly status: number
-  readonly detail?: unknown
+// Defaults to mock mode unless explicitly disabled (e.g. VITE_USE_MOCK_DATA=false)
+const USE_MOCK_DATA = import.meta.env.VITE_USE_MOCK_DATA !== 'false';
 
-  constructor(status: number, message: string, detail?: unknown) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.detail = detail
+/**
+ * Real API service communicating with the local computer-vision / backend server.
+ * Will connect to the backend developer's HTTP/WebSocket endpoints in subsequent phases.
+ */
+class RealApiService implements IApiService {
+  private baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
   }
-}
 
-export async function getScans(): Promise<ScanResult[]> {
-  const response = await fetch(`${API_BASE_URL}/scans`)
+  subscribeCalibration(
+    onUpdate: (data: CalibrationResponse) => void
+  ): () => void {
+    let isCancelled = false;
 
-  if (!response.ok) {
-    let errorMessage = `Failed to fetch scans: ${response.status}`
-    try {
-      const errorJson = await response.json()
-      if (typeof errorJson?.detail === 'string') {
-        errorMessage = errorJson.detail
+    const poll = async () => {
+      try {
+        const res = await fetch(`${this.baseUrl}/api/calibration/status`);
+        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+        const data: CalibrationResponse = await res.json();
+        if (!isCancelled) {
+          onUpdate(data);
+        }
+      } catch {
+        if (!isCancelled) {
+          onUpdate({
+            status: CalibrationStatus.DETECTING,
+            person_detected: false,
+          });
+        }
       }
-    } catch {
-      // ignore
-    }
-    throw new ApiError(response.status, errorMessage)
+    };
+
+    poll();
+    const interval = setInterval(poll, 500);
+
+    return () => {
+      isCancelled = true;
+      clearInterval(interval);
+    };
   }
 
-  return response.json()
-}
-
-export async function getScan(scanId: number): Promise<ScanResult> {
-  const response = await fetch(`${API_BASE_URL}/scans/${scanId}`)
-
-  if (!response.ok) {
-    let errorMessage = `Failed to fetch scan ${scanId}: ${response.status}`
-    try {
-      const errorJson = await response.json()
-      if (typeof errorJson?.detail === 'string') {
-        errorMessage = errorJson.detail
-      }
-    } catch {
-      // ignore
-    }
-    throw new ApiError(response.status, errorMessage)
+  async getCalibrationStatus(): Promise<CalibrationResponse> {
+    const res = await fetch(`${this.baseUrl}/api/calibration/status`);
+    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    return res.json();
   }
-
-  return response.json()
 }
 
-export async function analyzeBatch(
-  images: File[],
-  navigationFile: File,
-): Promise<BatchAnalysisResult> {
-  const formData = new FormData()
+/**
+ * Unified application API client.
+ * Decouples the UI from whether mock data or the real local backend is running.
+ */
+export const apiService: IApiService = USE_MOCK_DATA
+  ? mockApiService
+  : new RealApiService(API_BASE_URL);
 
-  for (const image of images) {
-    formData.append('scans', image)
-  }
-  formData.append('navigation', navigationFile)
-
-  const response = await fetch(`${API_BASE_URL}/batches/analyze`, {
-    method: 'POST',
-    body: formData,
-    // Do NOT set Content-Type header; browser automatically sets multipart/form-data boundary
-  })
-
-  if (!response.ok) {
-    let detailMessage = `Batch analysis failed with status ${response.status}`
-    let rawDetail: unknown = null
-    try {
-      const errorJson = await response.json()
-      rawDetail = errorJson?.detail
-      if (typeof errorJson?.detail === 'string') {
-        detailMessage = errorJson.detail
-      } else if (Array.isArray(errorJson?.detail)) {
-        detailMessage = errorJson.detail
-          .map((item: { msg?: string; loc?: (string | number)[] }) => item.msg || JSON.stringify(item))
-          .join(', ')
-      } else if (errorJson?.detail) {
-        detailMessage = JSON.stringify(errorJson.detail)
-      }
-    } catch {
-      if (response.statusText) {
-        detailMessage = `${detailMessage}: ${response.statusText}`
-      }
-    }
-    throw new ApiError(response.status, detailMessage, rawDetail)
-  }
-
-  return response.json()
-}
-
-export async function getBatch(batchId: string): Promise<InvestigationBatchResult> {
-  const response = await fetch(`${API_BASE_URL}/batches/${batchId}`)
-
-  if (!response.ok) {
-    let errorMessage = `Failed to fetch batch ${batchId}: ${response.status}`
-    try {
-      const errorJson = await response.json()
-      if (typeof errorJson?.detail === 'string') {
-        errorMessage = errorJson.detail
-      }
-    } catch {
-      // ignore
-    }
-    throw new ApiError(response.status, errorMessage)
-  }
-
-  return response.json()
-}
-
-export async function getBatchReportJson(batchId: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_BASE_URL}/batches/${batchId}/report/json`)
-
-  if (!response.ok) {
-    let errorMessage = `Failed to fetch batch JSON report: ${response.status}`
-    try {
-      const errorJson = await response.json()
-      if (typeof errorJson?.detail === 'string') {
-        errorMessage = errorJson.detail
-      }
-    } catch {
-      // ignore
-    }
-    throw new ApiError(response.status, errorMessage)
-  }
-
-  return response.json()
-}
-
-export async function getBatchReportGeoJson(batchId: string): Promise<Record<string, unknown>> {
-  const response = await fetch(`${API_BASE_URL}/batches/${batchId}/report/geojson`)
-
-  if (!response.ok) {
-    let errorMessage = `Failed to fetch batch GeoJSON report: ${response.status}`
-    try {
-      const errorJson = await response.json()
-      if (typeof errorJson?.detail === 'string') {
-        errorMessage = errorJson.detail
-      }
-    } catch {
-      // ignore
-    }
-    throw new ApiError(response.status, errorMessage)
-  }
-
-  return response.json()
-}
-
-export function getBatchReportPdfUrl(batchId: string): string {
-  return `${API_BASE_URL}/batches/${batchId}/report/pdf`
-}
+export { USE_MOCK_DATA, API_BASE_URL };
