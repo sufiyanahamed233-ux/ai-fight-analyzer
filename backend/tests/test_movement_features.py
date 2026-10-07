@@ -31,6 +31,7 @@ from app.analysis.models import (
 )
 from app.analysis.movement_features import (
     MovementFeaturesAnalyzer,
+    combine_multiview_features,
 )
 from app.pose.pose_detector import COCO_KEYPOINT_NAMES, Keypoint
 
@@ -732,3 +733,86 @@ class TestConfidenceFilteringAndSerialization:
         assert "body_displacement" in data
         assert "torso_rotation" in data
         assert data["coverage"]["total_frames"] == 3
+
+
+class TestCombineMultiviewFeatures:
+    """Tests for multi-view feature combination and fusion."""
+
+    def test_both_cameras_valid_fused(self):
+        analyzer = MovementFeaturesAnalyzer()
+        # Front sequence
+        frames_front = [
+            make_standard_fighter_frame(timestamp=0.1 * i, frame_index=i, ankle_spacing=120.0, left_arm_straight=False)
+            for i in range(10)
+        ]
+        seq_front = PoseSequence("front.avi", 1280, 720, 10.0, 10, 1.0, frames_front)
+        feat_front = analyzer.analyze(seq_front)
+
+        # Side sequence with greater arm extension
+        frames_side = [
+            make_standard_fighter_frame(timestamp=0.1 * i, frame_index=i, ankle_spacing=140.0, left_arm_straight=True)
+            for i in range(10)
+        ]
+        seq_side = PoseSequence("side.avi", 1280, 720, 10.0, 10, 1.0, frames_side)
+        feat_side = analyzer.analyze(seq_side)
+
+        fused = combine_multiview_features(feat_front, feat_side, min_tracking_duration=0.5)
+
+        # Stance uses front primary
+        assert fused.stance.mean_stance_width_norm == feat_front.stance.mean_stance_width_norm
+
+        # Striking reach uses maximum extension between front and side
+        assert fused.arm_extension.max_arm_extension is not None
+        assert fused.arm_extension.max_arm_extension >= feat_front.arm_extension.max_arm_extension
+
+        # Movement orthogonal multi-view displacement estimate
+        d_f = feat_front.body_displacement.total_displacement_norm
+        d_s = feat_side.body_displacement.total_displacement_norm
+        if d_f is not None and d_s is not None:
+            expected_disp = math.sqrt(d_f ** 2 + d_s ** 2)
+            assert fused.body_displacement.total_displacement_norm == pytest.approx(expected_disp, abs=1e-3)
+
+    def test_only_front_valid_fallback(self):
+        analyzer = MovementFeaturesAnalyzer()
+        frames_front = [make_standard_fighter_frame(timestamp=0.1 * i, frame_index=i) for i in range(10)]
+        seq_front = PoseSequence("front.avi", 1280, 720, 10.0, 10, 1.0, frames_front)
+        feat_front = analyzer.analyze(seq_front)
+
+        frames_side = [PoseFrame(frame_index=i, timestamp=0.1 * i, detection_present=False) for i in range(10)]
+        seq_side = PoseSequence("side.avi", 1280, 720, 10.0, 10, 1.0, frames_side)
+        feat_side = analyzer.analyze(seq_side)
+
+        fused = combine_multiview_features(feat_front, feat_side, min_tracking_duration=0.5)
+        assert fused.body_scale == feat_front.body_scale
+        assert fused.stance.valid_frames == feat_front.stance.valid_frames
+
+    def test_only_side_valid_fallback(self):
+        analyzer = MovementFeaturesAnalyzer()
+        frames_front = [PoseFrame(frame_index=i, timestamp=0.1 * i, detection_present=False) for i in range(10)]
+        seq_front = PoseSequence("front.avi", 1280, 720, 10.0, 10, 1.0, frames_front)
+        feat_front = analyzer.analyze(seq_front)
+
+        frames_side = [make_standard_fighter_frame(timestamp=0.1 * i, frame_index=i) for i in range(10)]
+        seq_side = PoseSequence("side.avi", 1280, 720, 10.0, 10, 1.0, frames_side)
+        feat_side = analyzer.analyze(seq_side)
+
+        fused = combine_multiview_features(feat_front, feat_side, min_tracking_duration=0.5)
+        assert fused.body_scale == feat_side.body_scale
+        assert fused.stance.valid_frames == feat_side.stance.valid_frames
+
+    def test_neither_valid_returns_empty_features(self):
+        analyzer = MovementFeaturesAnalyzer()
+        frames_front = [PoseFrame(frame_index=i, timestamp=0.1 * i, detection_present=False) for i in range(10)]
+        seq_front = PoseSequence("front.avi", 1280, 720, 10.0, 10, 1.0, frames_front)
+        feat_front = analyzer.analyze(seq_front)
+
+        frames_side = [PoseFrame(frame_index=i, timestamp=0.1 * i, detection_present=False) for i in range(10)]
+        seq_side = PoseSequence("side.avi", 1280, 720, 10.0, 10, 1.0, frames_side)
+        feat_side = analyzer.analyze(seq_side)
+
+        fused = combine_multiview_features(feat_front, feat_side, min_tracking_duration=0.5)
+        assert fused.body_scale is None
+        assert fused.coverage.detected_frames == 0
+        assert fused.stance.valid_frames == 0
+        assert fused.balance_score is None if hasattr(fused, "balance_score") else True
+        assert fused.guard.valid_frames == 0

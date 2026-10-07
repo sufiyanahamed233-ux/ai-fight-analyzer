@@ -63,6 +63,7 @@ class DetectionCoverageFeatures:
     total_frames: int = 0
     detected_frames: int = 0
     coverage_ratio: float = 0.0
+    tracking_duration_s: float = 0.0
 
 
 @dataclass

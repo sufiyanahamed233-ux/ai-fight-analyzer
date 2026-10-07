@@ -1,3 +1,8 @@
+import type {
+  FightAnalysisRequest,
+  FightObservationResult,
+} from './analysis.ts';
+
 export const CalibrationStatus = {
   DETECTING: 'detecting',
   READY: 'ready',
@@ -9,6 +14,8 @@ export type CalibrationStatus =
 export interface CalibrationResponse {
   status: CalibrationStatus;
   person_detected: boolean;
+  error?: string;
+  device_label?: string;
 }
 
 export interface IApiService {
@@ -24,4 +31,12 @@ export interface IApiService {
    * One-time check for calibration status
    */
   getCalibrationStatus(): Promise<CalibrationResponse>;
+
+  /**
+   * Trigger dual-camera recording and deterministic CV fight analysis.
+   */
+  analyzeFight(
+    request?: FightAnalysisRequest
+  ): Promise<FightObservationResult>;
 }
+

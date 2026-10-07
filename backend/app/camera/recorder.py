@@ -197,6 +197,23 @@ def _run_camera_worker(
         source=config.source,
         rotation=config.rotation,
     )
+
+    if config.role == CameraRole.FRONT:
+        from app.camera.shared_capture import shared_front_camera
+        if not shared_front_camera.is_running and (
+            isinstance(config.source, str) and config.source.startswith("http")
+        ):
+            shared_front_camera.start(config.source, config.rotation, config.width, config.height, config.fps)
+
+        if shared_front_camera.is_running and str(config.source) == str(shared_front_camera.source):
+            out[config.role] = shared_front_camera.record_to_session(
+                config=config,
+                stop_event=stop_event,
+                session_dir=session_dir,
+                ts_prefix=ts_prefix,
+            )
+            return
+
     cap = _open_capture(config.source)
 
     if not cap.isOpened():

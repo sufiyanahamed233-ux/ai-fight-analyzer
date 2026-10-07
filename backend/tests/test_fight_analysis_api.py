@@ -234,22 +234,56 @@ class TestFightAnalysisApi:
         assert "Camera recording failed" in data["detail"]
         assert "Device USB busy" in data["detail"]
 
-    async def test_fight_analyze_side_camera_fallback(self, tmp_path):
-        # Front camera fails, side camera succeeds
+    async def test_fight_analyze_front_camera_failure_no_side_fallback(self, tmp_path):
+        # Front camera fails, side camera succeeds -> must return 503, strictly no fallback to side camera
         mock_session = make_mock_recording_session(tmp_path, front_ok=False, side_ok=True)
-        mock_seq = make_dummy_pose_sequence(detected=True, frame_count=5)
 
-        with (
-            patch("app.api.routes.DualCameraRecorder.record", return_value=mock_session),
-            patch("app.api.routes.PoseSequenceAnalyzer.process_video", return_value=mock_seq) as mock_process,
-        ):
+        with patch("app.api.routes.DualCameraRecorder.record", return_value=mock_session):
             transport = ASGITransport(app=app)
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 res = await client.post("/api/v1/fight/analyze")
 
+        assert res.status_code == 503
+        data = res.json()
+        assert "Front camera recording failed" in data["detail"]
+
+    async def test_stream_front_status(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.get("/api/v1/stream/front/status")
+
         assert res.status_code == 200
-        # Assert process_video was called with side camera video path
-        mock_process.assert_called_once_with(mock_session.side.video_path)
+        data = res.json()
+        assert "available" in data
+        assert "running" in data
+
+    async def test_stream_front_stop(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.post("/api/v1/stream/front/stop")
+
+        assert res.status_code == 200
+        assert res.json() == {"status": "stopped"}
+
+    async def test_two_consecutive_fight_runs_without_restart(self, tmp_path):
+        # Verify two consecutive fight runs succeed and clean up properly
+        mock_session_1 = make_mock_recording_session(tmp_path / "run1", front_ok=True, side_ok=True)
+        mock_session_2 = make_mock_recording_session(tmp_path / "run2", front_ok=True, side_ok=True)
+        mock_seq = make_dummy_pose_sequence(detected=True, frame_count=10)
+
+        with (
+            patch("app.api.routes.DualCameraRecorder.record", side_effect=[mock_session_1, mock_session_2]),
+            patch("app.api.routes.PoseSequenceAnalyzer.process_video", return_value=mock_seq),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                res1 = await client.post("/api/v1/fight/analyze")
+                assert res1.status_code == 200
+                assert res1.json()["overall_score"] is not None
+
+                res2 = await client.post("/api/v1/fight/analyze")
+                assert res2.status_code == 200
+                assert res2.json()["overall_score"] is not None
 
     async def test_fight_analyze_pose_analysis_failure(self, tmp_path):
         mock_session = make_mock_recording_session(tmp_path, front_ok=True, side_ok=True)
@@ -290,3 +324,61 @@ class TestFightAnalysisApi:
         for cat in ("stance", "balance", "guard", "striking", "coordination", "movement"):
             assert data[cat]["score"] is None
             assert "insufficient" in data[cat]["observation"].lower() or "not sufficiently" in data[cat]["observation"].lower()
+
+    async def test_person_only_in_camera_1(self, tmp_path):
+        """Camera 1 has person, Camera 2 has empty scene -> Camera 1 analyzed."""
+        mock_session = make_mock_recording_session(tmp_path, front_ok=True, side_ok=True)
+        front_seq = make_dummy_pose_sequence(detected=True, frame_count=10)
+        side_seq = make_dummy_pose_sequence(detected=False, frame_count=10)
+
+        with (
+            patch("app.api.routes.DualCameraRecorder.record", return_value=mock_session),
+            patch("app.api.routes.PoseSequenceAnalyzer.process_video", side_effect=[front_seq, side_seq]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                res = await client.post("/api/v1/fight/analyze")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["overall_score"] is not None
+        assert data["overall_score"] > 0.0
+
+    async def test_person_only_in_camera_2(self, tmp_path):
+        """Camera 1 has table/empty, Camera 2 has person -> Camera 2 contributes and scores populated."""
+        mock_session = make_mock_recording_session(tmp_path, front_ok=True, side_ok=True)
+        front_seq = make_dummy_pose_sequence(detected=False, frame_count=10)
+        side_seq = make_dummy_pose_sequence(detected=True, frame_count=10)
+
+        with (
+            patch("app.api.routes.DualCameraRecorder.record", return_value=mock_session),
+            patch("app.api.routes.PoseSequenceAnalyzer.process_video", side_effect=[front_seq, side_seq]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                res = await client.post("/api/v1/fight/analyze")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["overall_score"] is not None
+        assert data["overall_score"] > 0.0
+
+    async def test_person_in_both_cameras_fused_analysis(self, tmp_path):
+        """Both Camera 1 and Camera 2 have person -> Fused analysis produced."""
+        mock_session = make_mock_recording_session(tmp_path, front_ok=True, side_ok=True)
+        front_seq = make_dummy_pose_sequence(detected=True, frame_count=10)
+        side_seq = make_dummy_pose_sequence(detected=True, frame_count=10)
+
+        with (
+            patch("app.api.routes.DualCameraRecorder.record", return_value=mock_session),
+            patch("app.api.routes.PoseSequenceAnalyzer.process_video", side_effect=[front_seq, side_seq]),
+        ):
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                res = await client.post("/api/v1/fight/analyze")
+
+        assert res.status_code == 200
+        data = res.json()
+        assert data["overall_score"] is not None
+        for cat in ("stance", "balance", "guard", "striking", "coordination", "movement"):
+            assert data[cat]["score"] is not None

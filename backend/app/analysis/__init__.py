@@ -15,7 +15,7 @@ from app.analysis.models import (
     WristFeatures,
 )
 from app.analysis.fight_observer import FightObservationAnalyzer
-from app.analysis.movement_features import MovementFeaturesAnalyzer
+from app.analysis.movement_features import MovementFeaturesAnalyzer, combine_multiview_features
 from app.analysis.pose_sequence import PoseSequenceAnalyzer
 from app.schemas.analysis import CategoryObservation, FightObservationResult
 
@@ -25,6 +25,7 @@ __all__ = [
     "PoseSequenceAnalyzer",
     "MovementFeatures",
     "MovementFeaturesAnalyzer",
+    "combine_multiview_features",
     "FightObservationAnalyzer",
     "FightObservationResult",
     "CategoryObservation",

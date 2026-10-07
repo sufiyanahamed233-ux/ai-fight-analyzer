@@ -185,7 +185,16 @@ class PoseSequenceAnalyzer:
 
                 det_result = self.detector.detect(frame)
 
-                if det_result.persons_detected > 0 and det_result.primary is not None:
+                is_valid = (
+                    det_result.persons_detected > 0
+                    and det_result.primary is not None
+                    and (
+                        not hasattr(det_result.primary, "is_valid_person")
+                        or det_result.primary.is_valid_person()
+                    )
+                )
+
+                if is_valid and det_result.primary is not None:
                     primary = det_result.primary
                     pose_frame = PoseFrame(
                         frame_index=frame_idx,

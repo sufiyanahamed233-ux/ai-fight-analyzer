@@ -3,7 +3,12 @@ import {
   type CalibrationResponse,
   type IApiService,
 } from '../types/calibration.ts';
+import type {
+  FightAnalysisRequest,
+  FightObservationResult,
+} from '../types/analysis.ts';
 import { mockApiService } from './mockApi.ts';
+import { checkPhone1StreamAvailable, PHONE1_STREAM_URL } from './camera.ts';
 
 // Configurable backend configuration via Vite environment variables
 const API_BASE_URL =
@@ -28,26 +33,41 @@ class RealApiService implements IApiService {
   ): () => void {
     let isCancelled = false;
 
-    const poll = async () => {
+    const checkStream = async () => {
       try {
-        const res = await fetch(`${this.baseUrl}/api/calibration/status`);
-        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-        const data: CalibrationResponse = await res.json();
-        if (!isCancelled) {
-          onUpdate(data);
-        }
-      } catch {
-        if (!isCancelled) {
+        const isAvailable = await checkPhone1StreamAvailable();
+        if (isCancelled) return;
+
+        if (isAvailable) {
+          onUpdate({
+            status: CalibrationStatus.READY,
+            person_detected: true,
+            device_label: 'Phone 1 (MJPEG Stream)',
+          });
+        } else {
           onUpdate({
             status: CalibrationStatus.DETECTING,
             person_detected: false,
+            error: `Phone 1 stream offline at ${PHONE1_STREAM_URL}. Please ensure DroidCam is running.`,
+          });
+        }
+      } catch (err: unknown) {
+        if (!isCancelled) {
+          const message =
+            err instanceof Error
+              ? err.message
+              : 'Failed to access Phone 1 stream.';
+          onUpdate({
+            status: CalibrationStatus.DETECTING,
+            person_detected: false,
+            error: message,
           });
         }
       }
     };
 
-    poll();
-    const interval = setInterval(poll, 500);
+    void checkStream();
+    const interval = setInterval(checkStream, 1500);
 
     return () => {
       isCancelled = true;
@@ -56,8 +76,67 @@ class RealApiService implements IApiService {
   }
 
   async getCalibrationStatus(): Promise<CalibrationResponse> {
-    const res = await fetch(`${this.baseUrl}/api/calibration/status`);
-    if (!res.ok) throw new Error(`HTTP error ${res.status}`);
+    try {
+      const isAvailable = await checkPhone1StreamAvailable();
+      if (isAvailable) {
+        return {
+          status: CalibrationStatus.READY,
+          person_detected: true,
+          device_label: 'Phone 1 (MJPEG Stream)',
+        };
+      }
+      return {
+        status: CalibrationStatus.DETECTING,
+        person_detected: false,
+        error: `Phone 1 stream offline at ${PHONE1_STREAM_URL}.`,
+      };
+    } catch (err: unknown) {
+      const message =
+        err instanceof Error ? err.message : 'Phone 1 stream unavailable.';
+      return {
+        status: CalibrationStatus.DETECTING,
+        person_detected: false,
+        error: message,
+      };
+    }
+  }
+
+  async analyzeFight(
+    request?: FightAnalysisRequest
+  ): Promise<FightObservationResult> {
+    const duration = request?.duration_seconds ?? request?.duration ?? 10;
+    const payload: Record<string, unknown> = {
+      duration_seconds: duration,
+      duration: duration,
+    };
+    if (request?.front_source) payload.front_source = request.front_source;
+    if (request?.side_source) payload.side_source = request.side_source;
+
+    const res = await fetch(`${this.baseUrl}/api/v1/fight/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      let errorDetail = `HTTP ${res.status}`;
+      try {
+        const errorJson = await res.json();
+        if (errorJson && typeof errorJson.detail === 'string') {
+          errorDetail = errorJson.detail;
+        } else if (errorJson && typeof errorJson.message === 'string') {
+          errorDetail = errorJson.message;
+        }
+      } catch {
+        if (res.statusText) {
+          errorDetail = `${res.status} ${res.statusText}`;
+        }
+      }
+      throw new Error(`Fight analysis failed: ${errorDetail}`);
+    }
+
     return res.json();
   }
 }

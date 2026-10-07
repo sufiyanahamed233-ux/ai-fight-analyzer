@@ -27,7 +27,10 @@ export const CalibrationScreen: React.FC<CalibrationScreenProps> = ({
   });
 
   const onCompleteRef = useRef(onComplete);
-  onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+  });
 
   useEffect(() => {
     let transitionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -103,17 +106,25 @@ export const CalibrationScreen: React.FC<CalibrationScreenProps> = ({
             <div className="space-y-1">
               <div
                 className={`text-2xl sm:text-3xl font-black uppercase tracking-widest transition-colors duration-300 ${
-                  isReady ? 'text-emerald-400' : 'text-neutral-200'
+                  isReady
+                    ? 'text-emerald-400'
+                    : data.error
+                      ? 'text-amber-400'
+                      : 'text-neutral-200'
                 }`}
               >
-                {isReady ? "You're Ready" : 'Detecting...'}
+                {isReady ? "You're Ready" : data.error ? 'Checking Camera 1' : 'Detecting...'}
               </div>
               <p className="text-xs font-mono tracking-wider text-neutral-400">
                 {isReady
-                  ? 'Locked on. Preparing instructions...'
-                  : data.person_detected
-                    ? 'Subject located. Aligning sensors...'
-                    : 'Awaiting subject in fighting zone...'}
+                  ? data.device_label
+                    ? `Locked on (${data.device_label}). Preparing instructions...`
+                    : 'Locked on. Preparing instructions...'
+                  : data.error
+                    ? data.error
+                    : data.person_detected
+                      ? 'Subject located. Aligning sensors...'
+                      : 'Connecting to Phone 1 stream (http://127.0.0.1:4747/video)...'}
               </p>
             </div>
           </div>

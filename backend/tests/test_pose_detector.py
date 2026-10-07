@@ -211,3 +211,54 @@ def test_model_not_reloaded_per_frame(mock_yolo):
     assert mock_cls.call_count == 1
     # model inference should be called 3 times
     assert mock_instance.call_count == 3
+
+
+def test_valid_person_filter_rejects_table_false_positives():
+    """Test that clutter/table detections lacking torso anchors are rejected."""
+    # Table false positive: only knees and ankles detected, no shoulders or hips
+    kps = [
+        Keypoint(
+            name=name,
+            index=i,
+            x_px=100.0,
+            y_px=100.0,
+            x_norm=0.1,
+            y_norm=0.1,
+            confidence=0.6 if name in ("left_knee", "right_knee", "left_ankle") else 0.1,
+        )
+        for i, name in enumerate(COCO_KEYPOINT_NAMES)
+    ]
+    pose = PoseResult(
+        person_index=0,
+        bbox_xyxy=(10.0, 10.0, 150.0, 150.0),
+        confidence=0.45,
+        keypoints=kps,
+        image_width=640,
+        image_height=480,
+    )
+    assert pose.is_valid_person() is False
+
+
+def test_valid_person_filter_accepts_human_pose():
+    """Test that a valid person with shoulder/hip anchor and >=5 keypoints passes."""
+    kps = [
+        Keypoint(
+            name=name,
+            index=i,
+            x_px=100.0,
+            y_px=100.0,
+            x_norm=0.1,
+            y_norm=0.1,
+            confidence=0.85 if name in ("left_shoulder", "right_shoulder", "left_hip", "right_hip", "nose", "left_wrist") else 0.1,
+        )
+        for i, name in enumerate(COCO_KEYPOINT_NAMES)
+    ]
+    pose = PoseResult(
+        person_index=0,
+        bbox_xyxy=(100.0, 50.0, 300.0, 450.0),
+        confidence=0.85,
+        keypoints=kps,
+        image_width=640,
+        image_height=480,
+    )
+    assert pose.is_valid_person() is True

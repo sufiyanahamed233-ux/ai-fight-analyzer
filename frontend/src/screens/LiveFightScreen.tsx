@@ -1,4 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { apiService } from '../services/api.ts';
+import { checkPhone1StreamAvailable, FRONT_STREAM_URL } from '../services/camera.ts';
+import type { FightObservationResult } from '../types/analysis.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,6 +35,12 @@ interface WristCoords {
 interface LiveFightScreenProps {
   /** Total fight duration in seconds (presentation-only timer). */
   durationSecs?: number;
+  /** Invoked when backend analysis completes with the observation result. */
+  onComplete?: (result: FightObservationResult) => void;
+  /** Invoked if the API request or camera recording returns an error. */
+  onError?: (error: string) => void;
+  /** Invoked when the 10-second visual timer reaches 0 and the backend result has not arrived yet. */
+  onProcessing?: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,16 +71,16 @@ function formatTime(totalSeconds: number): string {
 
 /**
  * Derive a human-readable message for each camera state.
- * Raw browser error text is intentionally never shown to the participant.
  */
-function cameraErrorMessage(state: CameraState): string {
+function cameraErrorMessage(state: CameraState, customMessage?: string | null): string {
+  if (customMessage) return customMessage;
   switch (state) {
     case 'denied':
-      return 'Camera access was denied. Please allow camera permissions and try again.';
+      return 'Stream access was denied. Please check your browser settings.';
     case 'unavailable':
-      return 'Camera is unavailable on this device. Please check your hardware and try again.';
+      return `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running on Phone 1 and ADB forwarding is active.`;
     default:
-      return 'An unexpected error occurred with the camera.';
+      return 'An unexpected error occurred with the camera stream.';
   }
 }
 
@@ -301,64 +310,93 @@ function useGloveOverlay(
  */
 export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   durationSecs = DEFAULT_DURATION_SECS,
+  onComplete,
+  onError,
+  onProcessing,
 }) => {
-  const videoRef     = useRef<HTMLVideoElement>(null);
-  const streamRef    = useRef<MediaStream | null>(null);
   const canvasRef    = useRef<HTMLCanvasElement>(null);
   const viewportRef  = useRef<HTMLDivElement>(null);
 
-  const [cameraState, setCameraState] = useState<CameraState>('requesting');
-  const [timeLeft,    setTimeLeft]    = useState<number>(durationSecs);
-  const [timerDone,   setTimerDone]   = useState<boolean>(false);
+  const [cameraState,       setCameraState]       = useState<CameraState>('requesting');
+  const [cameraCustomError, setCameraCustomError] = useState<string | null>(null);
+  const [streamSrc,         _setStreamSrc]        = useState<string>(FRONT_STREAM_URL);
+  const [timeLeft,          setTimeLeft]          = useState<number>(durationSecs);
+  const [timerDone,         setTimerDone]         = useState<boolean>(false);
+  const [apiError,          setApiError]          = useState<string | null>(null);
+  const [analysisResult,    setAnalysisResult]    = useState<FightObservationResult | null>(null);
+
+  const analysisTriggeredRef = useRef<boolean>(false);
+  const resultRef            = useRef<FightObservationResult | null>(null);
+  const onCompleteRef        = useRef(onComplete);
+  const onErrorRef           = useRef(onError);
+  const onProcessingRef      = useRef(onProcessing);
+
+  useEffect(() => {
+    onCompleteRef.current = onComplete;
+    onErrorRef.current = onError;
+    onProcessingRef.current = onProcessing;
+  });
+
+  useEffect(() => {
+    console.log('[LiveFightScreen] Mounted, streamSrc:', streamSrc);
+  }, [streamSrc]);
 
   // -------------------------------------------------------------------------
-  // Camera acquisition + cleanup
+  // Phone 1 MJPEG Stream verification
   // -------------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
 
-    async function startCamera() {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user' },
-          audio: false,
-        });
+    async function verifyStream() {
+      setCameraState('requesting');
+      setCameraCustomError(null);
 
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop());
-          return;
-        }
+      const available = await checkPhone1StreamAvailable();
+      if (cancelled) return;
 
-        streamRef.current = stream;
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-
+      if (available) {
         setCameraState('ready');
-      } catch (err: unknown) {
-        if (cancelled) return;
-
-        const name = err instanceof DOMException ? err.name : '';
-
-        if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-          setCameraState('denied');
-        } else {
-          setCameraState('unavailable');
-        }
+      } else {
+        setCameraState('unavailable');
+        setCameraCustomError(
+          `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running on Phone 1.`
+        );
       }
     }
 
-    void startCamera();
+    void verifyStream();
 
     return () => {
       cancelled = true;
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
     };
   }, []);
+
+  // -------------------------------------------------------------------------
+  // Dual-camera backend recording + analysis trigger
+  // Called exactly once when the camera is ready.
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    if (cameraState !== 'ready') return;
+    if (analysisTriggeredRef.current) return;
+    analysisTriggeredRef.current = true;
+
+    apiService
+      .analyzeFight({ duration_seconds: durationSecs })
+      .then((res) => {
+        resultRef.current = res;
+        setAnalysisResult(res);
+        // When backend returns, call onComplete(result)
+        onCompleteRef.current?.(res);
+      })
+      .catch((err: unknown) => {
+        const message =
+          err instanceof Error
+            ? err.message
+            : 'Dual-camera recording or fight analysis failed.';
+        setApiError(message);
+        onErrorRef.current?.(message);
+      });
+  }, [cameraState, durationSecs]);
 
   // -------------------------------------------------------------------------
   // Glove canvas overlay (active only when camera is ready)
@@ -379,6 +417,15 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         if (prev <= 1) {
           clearInterval(interval);
           setTimerDone(true);
+
+          // When the frontend timer reaches 0:
+          if (!resultRef.current) {
+            // Show processing if backend result has not arrived yet
+            onProcessingRef.current?.();
+          } else {
+            // Backend result has already arrived
+            onCompleteRef.current?.(resultRef.current);
+          }
           return 0;
         }
         return prev - 1;
@@ -428,17 +475,27 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         className="relative flex-1 bg-black flex items-center justify-center overflow-hidden"
       >
 
-        {/* Live video feed – CSS-mirrored so the participant sees themselves correctly */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
+        {/* Live Phone 1 MJPEG stream – CSS-mirrored so the participant sees themselves correctly */}
+        <img
+          src={streamSrc}
+          alt="Live fight camera feed from Phone 1"
+          onLoad={() => {
+            console.log('[LiveFightScreen] img onLoad fired for:', streamSrc);
+            setCameraState('ready');
+            setCameraCustomError(null);
+          }}
+          onError={(e) => {
+            console.error('[LiveFightScreen] img onError fired for:', streamSrc, e);
+            setCameraState('unavailable');
+            setCameraCustomError(
+              `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running.`
+            );
+          }}
           style={{ transform: 'scaleX(-1)' }}
           className={`w-full h-full object-cover transition-opacity duration-500 ${
             cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
           }`}
-          aria-label="Live fight camera feed"
+          aria-label="Live fight camera feed from Phone 1"
         />
 
         {/*
@@ -479,11 +536,41 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             </div>
             <div className="space-y-3 max-w-sm">
               <p className="text-white font-black uppercase tracking-wide text-xl">
-                Camera Unavailable
+                {cameraState === 'denied' ? 'Stream Access Denied' : 'Phone 1 Offline'}
               </p>
               <p className="text-neutral-400 font-mono text-sm leading-relaxed">
-                {cameraErrorMessage(cameraState)}
+                {cameraErrorMessage(cameraState, cameraCustomError)}
               </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── Processing telemetry overlay (timer reached 0 while waiting for backend) ── */}
+        {timerDone && !analysisResult && !apiError && (
+          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-neutral-950/80 backdrop-blur-sm">
+            <div className="relative flex items-center justify-center w-16 h-16">
+              <div className="absolute inset-0 rounded-full border-2 border-red-500/30 animate-ping" />
+              <div className="w-12 h-12 rounded-full border-2 border-dashed border-red-500/80 animate-spin" />
+              <div className="w-3.5 h-3.5 rounded-full bg-red-600" />
+            </div>
+            <div className="text-center space-y-1 px-4">
+              <p className="text-white font-mono text-xs uppercase tracking-[0.25em] font-bold">
+                Processing Telemetry…
+              </p>
+              <p className="text-neutral-400 font-mono text-[11px]">
+                Computing dual-camera pose kinematics and movement features
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* ── API / Recording Error Banner ── */}
+        {apiError && (
+          <div className="absolute bottom-4 inset-x-6 z-30 flex items-center justify-between p-3.5 rounded-xl bg-red-950/90 border border-red-700/80 text-red-200 text-xs font-mono shadow-2xl backdrop-blur-sm">
+            <div className="flex items-center gap-2.5">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span className="font-semibold">Analysis Error:</span>
+              <span className="text-red-300">{apiError}</span>
             </div>
           </div>
         )}

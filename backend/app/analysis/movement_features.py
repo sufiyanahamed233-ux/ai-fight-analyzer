@@ -67,14 +67,20 @@ def _get_kp(frame: PoseFrame, name: str, min_conf: float) -> Optional[Tuple[floa
 class MovementFeaturesAnalyzer:
     """Analyzes a PoseSequence and computes normalized, explainable kinematic features."""
 
-    def __init__(self, min_keypoint_confidence: float = DEFAULT_MIN_KEYPOINT_CONFIDENCE):
+    def __init__(
+        self,
+        min_keypoint_confidence: float = DEFAULT_MIN_KEYPOINT_CONFIDENCE,
+        min_tracking_duration: float = 0.0,
+    ):
         """
         Initialize the movement feature analyzer.
 
         Args:
             min_keypoint_confidence: Threshold below which keypoints are ignored as missing.
+            min_tracking_duration: Minimum valid person tracking duration in seconds (default 0.0).
         """
         self.min_keypoint_confidence = min_keypoint_confidence
+        self.min_tracking_duration = min_tracking_duration
 
     def analyze(self, sequence: PoseSequence) -> MovementFeatures:
         """
@@ -91,6 +97,24 @@ class MovementFeaturesAnalyzer:
 
         # 1. Detection coverage
         coverage = self._compute_detection_coverage(sequence)
+
+        # If sequence has zero detections or falls below required tracking duration
+        if sequence.detected_frames_count == 0 or (
+            self.min_tracking_duration > 0.0
+            and coverage.tracking_duration_s < self.min_tracking_duration
+        ):
+            return MovementFeatures(
+                coverage=coverage,
+                stance=StanceFeatures(valid_frames=0),
+                torso_hip=TorsoHipFeatures(valid_frames=0),
+                pose_stability=PoseStabilityFeatures(valid_frames=0),
+                wrists=WristFeatures(valid_frames=0),
+                guard=GuardFeatures(valid_frames=0),
+                arm_extension=ArmExtensionFeatures(valid_frames=0),
+                body_displacement=BodyDisplacementFeatures(valid_frames=0),
+                torso_rotation=TorsoRotationFeatures(valid_frames=0),
+                body_scale=None,
+            )
 
         # 2. Sequence-level body scale reference (in pixels)
         body_scale = self._compute_body_scale(frames, min_conf)
@@ -178,14 +202,32 @@ class MovementFeaturesAnalyzer:
     # 2. Detection Coverage
     # -----------------------------------------------------------------------
 
+    def _compute_tracking_duration(self, sequence: PoseSequence) -> float:
+        """Calculate the active duration (in seconds) during which a valid person was tracked."""
+        valid_frames = [f for f in sequence.frames if f.detection_present]
+        if len(valid_frames) < 2:
+            return 0.0
+        fps = sequence.source_fps if sequence.source_fps > 0 else 30.0
+        max_dt_gap = max(0.5, 3.0 / fps)
+        tracked = 0.0
+        prev_t = valid_frames[0].timestamp
+        for f in valid_frames[1:]:
+            dt = f.timestamp - prev_t
+            if 0 < dt <= max_dt_gap:
+                tracked += dt
+            prev_t = f.timestamp
+        return tracked
+
     def _compute_detection_coverage(self, sequence: PoseSequence) -> DetectionCoverageFeatures:
         total = len(sequence.frames)
         detected = sequence.detected_frames_count
         ratio = (detected / total) if total > 0 else 0.0
+        tracking_duration = self._compute_tracking_duration(sequence)
         return DetectionCoverageFeatures(
             total_frames=total,
             detected_frames=detected,
             coverage_ratio=float(ratio),
+            tracking_duration_s=float(tracking_duration),
         )
 
     # -----------------------------------------------------------------------
@@ -708,3 +750,253 @@ class MovementFeaturesAnalyzer:
             shoulder_hip_twist_mean_deg=twist_mean,
             valid_frames=len(shoulder_angles),
         )
+
+
+def combine_multiview_features(
+    front: MovementFeatures,
+    side: Optional[MovementFeatures] = None,
+    min_tracking_duration: float = 0.5,
+) -> MovementFeatures:
+    """
+    Deterministically combine movement features from Camera 1 (Front) and Camera 2 (Side).
+
+    Category-specific fusion rules:
+    - Stance: Front primary (lateral foot spacing in frontal plane), side fallback.
+    - Balance: Front + Side fusion (lateral torso sway + sagittal forward/backward lean).
+    - Guard: Front primary with side support.
+    - Striking: Use side for extension reach visibility and strongest peak hand velocities.
+    - Coordination: Front + Side fusion of kinetic chain rotation and symmetry.
+    - Movement: Orthogonal multi-view displacement estimate: sqrt(D_front^2 + D_side^2).
+
+    Fallback rules:
+    - If only Front has valid tracking -> use Front.
+    - If only Side has valid tracking -> use Side.
+    - If neither has valid tracking -> return empty features with valid_frames=0.
+    """
+    def _is_valid_view(feat: Optional[MovementFeatures]) -> bool:
+        if feat is None:
+            return False
+        if feat.coverage.detected_frames == 0 or feat.body_scale is None or feat.body_scale <= 0:
+            return False
+        if feat.coverage.total_frames >= 10 and feat.coverage.tracking_duration_s < min_tracking_duration:
+            return False
+        return True
+
+    front_ok = _is_valid_view(front)
+    side_ok = _is_valid_view(side)
+
+    # 1. Neither camera has valid tracking
+    if not front_ok and not side_ok:
+        total_f = max(front.coverage.total_frames, (side.coverage.total_frames if side else 0))
+        return MovementFeatures(
+            coverage=DetectionCoverageFeatures(
+                total_frames=total_f,
+                detected_frames=0,
+                coverage_ratio=0.0,
+                tracking_duration_s=0.0,
+            ),
+            stance=StanceFeatures(valid_frames=0),
+            torso_hip=TorsoHipFeatures(valid_frames=0),
+            pose_stability=PoseStabilityFeatures(valid_frames=0),
+            wrists=WristFeatures(valid_frames=0),
+            guard=GuardFeatures(valid_frames=0),
+            arm_extension=ArmExtensionFeatures(valid_frames=0),
+            body_displacement=BodyDisplacementFeatures(valid_frames=0),
+            torso_rotation=TorsoRotationFeatures(valid_frames=0),
+            body_scale=None,
+        )
+
+    # 2. Only Front is valid
+    if front_ok and not side_ok:
+        return front
+
+    # 3. Only Side is valid
+    if side_ok and not front_ok:
+        assert side is not None
+        return side
+
+    # 4. Both Front and Side are valid -> Apply category-specific fusion
+    assert side is not None
+
+    # Stance: Front primary (lateral base separation), side fallback
+    if front.stance.valid_frames > 0:
+        stance = front.stance
+    else:
+        stance = side.stance
+
+    # Balance: Front + Side fusion (lateral sway + sagittal forward/backward lean)
+    if front.torso_hip.torso_hip_stability_score is not None and side.torso_hip.torso_hip_stability_score is not None:
+        th_stab = 0.5 * front.torso_hip.torso_hip_stability_score + 0.5 * side.torso_hip.torso_hip_stability_score
+    else:
+        th_stab = front.torso_hip.torso_hip_stability_score if front.torso_hip.torso_hip_stability_score is not None else side.torso_hip.torso_hip_stability_score
+
+    if front.torso_hip.torso_vertical_tilt_std_deg is not None and side.torso_hip.torso_vertical_tilt_std_deg is not None:
+        tilt_std = 0.5 * front.torso_hip.torso_vertical_tilt_std_deg + 0.5 * side.torso_hip.torso_vertical_tilt_std_deg
+    else:
+        tilt_std = front.torso_hip.torso_vertical_tilt_std_deg if front.torso_hip.torso_vertical_tilt_std_deg is not None else side.torso_hip.torso_vertical_tilt_std_deg
+
+    if front.pose_stability.pose_stability_score is not None and side.pose_stability.pose_stability_score is not None:
+        ps_stab = 0.5 * front.pose_stability.pose_stability_score + 0.5 * side.pose_stability.pose_stability_score
+    else:
+        ps_stab = front.pose_stability.pose_stability_score if front.pose_stability.pose_stability_score is not None else side.pose_stability.pose_stability_score
+
+    torso_hip = TorsoHipFeatures(
+        hip_speed_mean_norm=front.torso_hip.hip_speed_mean_norm or side.torso_hip.hip_speed_mean_norm,
+        hip_speed_std_norm=front.torso_hip.hip_speed_std_norm or side.torso_hip.hip_speed_std_norm,
+        torso_vertical_tilt_mean_deg=front.torso_hip.torso_vertical_tilt_mean_deg or side.torso_hip.torso_vertical_tilt_mean_deg,
+        torso_vertical_tilt_std_deg=tilt_std,
+        torso_hip_stability_score=th_stab,
+        valid_frames=max(front.torso_hip.valid_frames, side.torso_hip.valid_frames),
+    )
+    pose_stability = PoseStabilityFeatures(
+        pose_stability_score=ps_stab,
+        mean_keypoint_jitter_norm=front.pose_stability.mean_keypoint_jitter_norm or side.pose_stability.mean_keypoint_jitter_norm,
+        valid_frames=max(front.pose_stability.valid_frames, side.pose_stability.valid_frames),
+    )
+
+    # Guard: Front primary with side support (0.7 front, 0.3 side)
+    if front.guard.guard_position_ratio is not None and side.guard.guard_position_ratio is not None:
+        g_ratio = 0.7 * front.guard.guard_position_ratio + 0.3 * side.guard.guard_position_ratio
+    else:
+        g_ratio = front.guard.guard_position_ratio if front.guard.guard_position_ratio is not None else side.guard.guard_position_ratio
+
+    if front.guard.both_guard_ratio is not None and side.guard.both_guard_ratio is not None:
+        b_ratio = 0.7 * front.guard.both_guard_ratio + 0.3 * side.guard.both_guard_ratio
+    else:
+        b_ratio = front.guard.both_guard_ratio if front.guard.both_guard_ratio is not None else side.guard.both_guard_ratio
+
+    guard = GuardFeatures(
+        left_guard_ratio=front.guard.left_guard_ratio if front.guard.left_guard_ratio is not None else side.guard.left_guard_ratio,
+        right_guard_ratio=front.guard.right_guard_ratio if front.guard.right_guard_ratio is not None else side.guard.right_guard_ratio,
+        both_guard_ratio=b_ratio,
+        guard_position_ratio=g_ratio,
+        valid_frames=max(front.guard.valid_frames, side.guard.valid_frames),
+    )
+
+    # Striking: Use side for extension reach visibility and strongest valid velocity metrics
+    f_ext = front.arm_extension.max_arm_extension
+    s_ext = side.arm_extension.max_arm_extension
+    max_arm_ext = max(f_ext or 0.0, s_ext or 0.0) if (f_ext is not None or s_ext is not None) else None
+
+    f_l_ext = front.arm_extension.left_arm_extension_max
+    s_l_ext = side.arm_extension.left_arm_extension_max
+    l_arm_ext = max(f_l_ext or 0.0, s_l_ext or 0.0) if (f_l_ext is not None or s_l_ext is not None) else None
+
+    f_r_ext = front.arm_extension.right_arm_extension_max
+    s_r_ext = side.arm_extension.right_arm_extension_max
+    r_arm_ext = max(f_r_ext or 0.0, s_r_ext or 0.0) if (f_r_ext is not None or s_r_ext is not None) else None
+
+    arm_extension = ArmExtensionFeatures(
+        left_arm_extension_mean=front.arm_extension.left_arm_extension_mean or side.arm_extension.left_arm_extension_mean,
+        left_arm_extension_max=l_arm_ext,
+        right_arm_extension_mean=front.arm_extension.right_arm_extension_mean or side.arm_extension.right_arm_extension_mean,
+        right_arm_extension_max=r_arm_ext,
+        max_arm_extension=max_arm_ext,
+        left_elbow_angle_mean_deg=front.arm_extension.left_elbow_angle_mean_deg or side.arm_extension.left_elbow_angle_mean_deg,
+        right_elbow_angle_mean_deg=front.arm_extension.right_elbow_angle_mean_deg or side.arm_extension.right_elbow_angle_mean_deg,
+        valid_frames=max(front.arm_extension.valid_frames, side.arm_extension.valid_frames),
+    )
+
+    f_peak_v = front.wrists.peak_wrist_velocity_norm
+    s_peak_v = side.wrists.peak_wrist_velocity_norm
+    peak_wrist_v = max(f_peak_v or 0.0, s_peak_v or 0.0) if (f_peak_v is not None or s_peak_v is not None) else None
+
+    f_avg_v = front.wrists.avg_wrist_velocity_norm
+    s_avg_v = side.wrists.avg_wrist_velocity_norm
+    if f_avg_v is not None and s_avg_v is not None:
+        avg_wrist_v = 0.5 * f_avg_v + 0.5 * s_avg_v
+    else:
+        avg_wrist_v = f_avg_v if f_avg_v is not None else s_avg_v
+
+    wrists = WristFeatures(
+        left_wrist_avg_velocity_norm=front.wrists.left_wrist_avg_velocity_norm or side.wrists.left_wrist_avg_velocity_norm,
+        left_wrist_peak_velocity_norm=max(front.wrists.left_wrist_peak_velocity_norm or 0.0, side.wrists.left_wrist_peak_velocity_norm or 0.0) or None,
+        left_wrist_movement_range_x=front.wrists.left_wrist_movement_range_x,
+        left_wrist_movement_range_y=front.wrists.left_wrist_movement_range_y,
+        left_wrist_movement_range_total=front.wrists.left_wrist_movement_range_total or side.wrists.left_wrist_movement_range_total,
+        right_wrist_avg_velocity_norm=front.wrists.right_wrist_avg_velocity_norm or side.wrists.right_wrist_avg_velocity_norm,
+        right_wrist_peak_velocity_norm=max(front.wrists.right_wrist_peak_velocity_norm or 0.0, side.wrists.right_wrist_peak_velocity_norm or 0.0) or None,
+        right_wrist_movement_range_x=front.wrists.right_wrist_movement_range_x,
+        right_wrist_movement_range_y=front.wrists.right_wrist_movement_range_y,
+        right_wrist_movement_range_total=front.wrists.right_wrist_movement_range_total or side.wrists.right_wrist_movement_range_total,
+        peak_wrist_velocity_norm=peak_wrist_v,
+        avg_wrist_velocity_norm=avg_wrist_v,
+        valid_frames=max(front.wrists.valid_frames, side.wrists.valid_frames),
+    )
+
+    # Coordination: Front + Side fusion
+    f_tw = front.torso_rotation.shoulder_hip_twist_mean_deg
+    s_tw = side.torso_rotation.shoulder_hip_twist_mean_deg
+    if f_tw is not None and s_tw is not None:
+        twist_val = 0.5 * f_tw + 0.5 * s_tw
+    else:
+        twist_val = f_tw if f_tw is not None else s_tw
+
+    f_rot_s = front.torso_rotation.torso_rotation_speed_mean_deg_s
+    s_rot_s = side.torso_rotation.torso_rotation_speed_mean_deg_s
+    if f_rot_s is not None and s_rot_s is not None:
+        rot_spd = 0.5 * f_rot_s + 0.5 * s_rot_s
+    else:
+        rot_spd = f_rot_s if f_rot_s is not None else s_rot_s
+
+    torso_rotation = TorsoRotationFeatures(
+        mean_torso_angle_deg=front.torso_rotation.mean_torso_angle_deg,
+        torso_angle_range_deg=front.torso_rotation.torso_angle_range_deg,
+        torso_rotation_speed_mean_deg_s=rot_spd,
+        torso_rotation_speed_max_deg_s=max(front.torso_rotation.torso_rotation_speed_max_deg_s or 0.0, side.torso_rotation.torso_rotation_speed_max_deg_s or 0.0) or None,
+        shoulder_hip_twist_mean_deg=twist_val,
+        valid_frames=max(front.torso_rotation.valid_frames, side.torso_rotation.valid_frames),
+    )
+
+    # Movement: Orthogonal multi-view displacement estimate
+    f_disp = front.body_displacement.total_displacement_norm
+    s_disp = side.body_displacement.total_displacement_norm
+    if f_disp is not None and s_disp is not None:
+        total_disp = float(math.sqrt(f_disp ** 2 + s_disp ** 2))
+    else:
+        total_disp = f_disp if f_disp is not None else s_disp
+
+    f_net = front.body_displacement.net_displacement_norm
+    s_net = side.body_displacement.net_displacement_norm
+    if f_net is not None and s_net is not None:
+        net_disp = float(math.sqrt(f_net ** 2 + s_net ** 2))
+    else:
+        net_disp = f_net if f_net is not None else s_net
+
+    f_vel = front.body_displacement.avg_velocity_norm
+    s_vel = side.body_displacement.avg_velocity_norm
+    if f_vel is not None and s_vel is not None:
+        avg_vel = float(math.sqrt(f_vel ** 2 + s_vel ** 2))
+    else:
+        avg_vel = f_vel if f_vel is not None else s_vel
+
+    peak_vel = max(front.body_displacement.peak_velocity_norm or 0.0, side.body_displacement.peak_velocity_norm or 0.0) or None
+
+    body_displacement = BodyDisplacementFeatures(
+        total_displacement_norm=total_disp,
+        net_displacement_norm=net_disp,
+        avg_velocity_norm=avg_vel,
+        peak_velocity_norm=peak_vel,
+        valid_frames=max(front.body_displacement.valid_frames, side.body_displacement.valid_frames),
+    )
+
+    # Aggregated coverage and body scale
+    coverage = DetectionCoverageFeatures(
+        total_frames=max(front.coverage.total_frames, side.coverage.total_frames),
+        detected_frames=max(front.coverage.detected_frames, side.coverage.detected_frames),
+        coverage_ratio=max(front.coverage.coverage_ratio, side.coverage.coverage_ratio),
+        tracking_duration_s=max(front.coverage.tracking_duration_s, side.coverage.tracking_duration_s),
+    )
+
+    return MovementFeatures(
+        coverage=coverage,
+        stance=stance,
+        torso_hip=torso_hip,
+        pose_stability=pose_stability,
+        wrists=wrists,
+        guard=guard,
+        arm_extension=arm_extension,
+        body_displacement=body_displacement,
+        torso_rotation=torso_rotation,
+        body_scale=front.body_scale or side.body_scale,
+    )

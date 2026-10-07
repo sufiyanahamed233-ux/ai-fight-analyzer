@@ -71,6 +71,44 @@ class PoseResult:
                 return kp
         return None
 
+    def is_valid_person(
+        self,
+        min_keypoint_conf: float = 0.35,
+        min_confident_keypoints: int = 5,
+        min_bbox_height_ratio: float = 0.12,
+    ) -> bool:
+        """Validate that a detected pose represents an anatomically plausible human person
+        rather than background clutter, furniture, or false-positive edge artifacts.
+
+        Criteria:
+        1. Bounding box height >= min_bbox_height_ratio of frame height.
+        2. At least min_confident_keypoints keypoints with confidence >= min_keypoint_conf.
+        3. Core torso anchor: at least one shoulder AND at least one hip keypoint with
+           confidence >= min_keypoint_conf.
+        """
+        if self.image_height > 0:
+            box_h = abs(self.bbox_xyxy[3] - self.bbox_xyxy[1])
+            if (box_h / self.image_height) < min_bbox_height_ratio:
+                return False
+
+        confident_count = sum(1 for kp in self.keypoints if kp.confidence >= min_keypoint_conf)
+        if confident_count < min_confident_keypoints:
+            return False
+
+        ls = self.get_keypoint("left_shoulder")
+        rs = self.get_keypoint("right_shoulder")
+        lh = self.get_keypoint("left_hip")
+        rh = self.get_keypoint("right_hip")
+
+        has_shoulder = (ls is not None and ls.confidence >= min_keypoint_conf) or (
+            rs is not None and rs.confidence >= min_keypoint_conf
+        )
+        has_hip = (lh is not None and lh.confidence >= min_keypoint_conf) or (
+            rh is not None and rh.confidence >= min_keypoint_conf
+        )
+
+        return has_shoulder and has_hip
+
 
 @dataclass
 class DetectionResult:
@@ -241,24 +279,26 @@ class PoseDetector:
                     )
                 )
 
-            all_persons.append(
-                PoseResult(
-                    person_index=p_idx,
-                    bbox_xyxy=box,  # type: ignore
-                    confidence=p_conf,
-                    keypoints=keypoints,
-                    image_width=w,
-                    image_height=h,
-                )
+            pose = PoseResult(
+                person_index=p_idx,
+                bbox_xyxy=box,  # type: ignore
+                confidence=p_conf,
+                keypoints=keypoints,
+                image_width=w,
+                image_height=h,
             )
+            all_persons.append(pose)
 
-        # Primary person selection: highest bounding box confidence
-        primary = max(all_persons, key=lambda p: p.confidence) if all_persons else None
+        # Filter for anatomically valid persons (reject table edges, clutter, furniture)
+        valid_persons = [p for p in all_persons if p.is_valid_person()]
+
+        # Primary person selection: highest bounding box confidence among valid persons
+        primary = max(valid_persons, key=lambda p: p.confidence) if valid_persons else None
 
         return DetectionResult(
-            persons_detected=len(all_persons),
+            persons_detected=len(valid_persons),
             primary=primary,
-            all_persons=all_persons,
+            all_persons=valid_persons,
             inference_time_ms=inference_time_ms,
             image_width=w,
             image_height=h,
