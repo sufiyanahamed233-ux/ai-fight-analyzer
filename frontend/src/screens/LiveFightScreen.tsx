@@ -240,16 +240,14 @@ function useGloveOverlay(
     const { width, height } = canvas;
     ctx.clearRect(0, 0, width, height);
 
-    // Glove size scales with the smaller canvas dimension
-    const size = Math.min(width, height) * 0.065;
-
-    // Left glove (participant's left → right side of mirrored frame)
-    const left = normToCanvas(MOCK_WRISTS.left, width, height);
-    drawGlove(ctx, left.cx, left.cy, size, true, '#cc1a1a');
-
-    // Right glove (participant's right → left side of mirrored frame)
-    const right = normToCanvas(MOCK_WRISTS.right, width, height);
-    drawGlove(ctx, right.cx, right.cy, size, false, '#cc1a1a');
+    // Virtual boxing glove visuals disabled
+    if (false as boolean) {
+      const size = Math.min(width, height) * 0.065;
+      const left = normToCanvas(MOCK_WRISTS.left, width, height);
+      drawGlove(ctx, left.cx, left.cy, size, true, '#cc1a1a');
+      const right = normToCanvas(MOCK_WRISTS.right, width, height);
+      drawGlove(ctx, right.cx, right.cy, size, false, '#cc1a1a');
+    }
   }, []);
 
   useEffect(() => {
