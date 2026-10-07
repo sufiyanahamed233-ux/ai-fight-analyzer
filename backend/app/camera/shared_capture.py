@@ -20,7 +20,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Optional, Union
 
 import cv2
 import numpy as np
@@ -41,6 +41,63 @@ from app.camera.recorder import (
 
 logger = logging.getLogger(__name__)
 
+COCO_SKELETON_PAIRS: list[tuple[str, str]] = [
+    # Head
+    ("nose", "left_eye"),
+    ("nose", "right_eye"),
+    ("left_eye", "left_ear"),
+    ("right_eye", "right_ear"),
+    # Torso & Shoulders
+    ("left_shoulder", "right_shoulder"),
+    ("left_shoulder", "left_hip"),
+    ("right_shoulder", "right_hip"),
+    ("left_hip", "right_hip"),
+    # Arms
+    ("left_shoulder", "left_elbow"),
+    ("left_elbow", "left_wrist"),
+    ("right_shoulder", "right_elbow"),
+    ("right_elbow", "right_wrist"),
+    # Legs
+    ("left_hip", "left_knee"),
+    ("left_knee", "left_ankle"),
+    ("right_hip", "right_knee"),
+    ("right_knee", "right_ankle"),
+]
+
+
+def draw_pose_skeleton(frame: np.ndarray, pose: Any) -> None:
+    """Draw subtle 17 COCO keypoints and connecting skeleton lines onto frame in-place."""
+    if pose is None:
+        return
+
+    # 1. Draw subtle skeleton limb lines
+    for k1_name, k2_name in COCO_SKELETON_PAIRS:
+        kp1 = pose.get_keypoint(k1_name)
+        kp2 = pose.get_keypoint(k2_name)
+        if (
+            kp1 is not None
+            and kp2 is not None
+            and getattr(kp1, "confidence", 0.0) >= 0.35
+            and getattr(kp2, "confidence", 0.0) >= 0.35
+            and kp1.x_px > 0
+            and kp1.y_px > 0
+            and kp2.x_px > 0
+            and kp2.y_px > 0
+        ):
+            pt1 = (int(round(kp1.x_px)), int(round(kp1.y_px)))
+            pt2 = (int(round(kp2.x_px)), int(round(kp2.y_px)))
+            # Subtle electric emerald/cyan lines: BGR (0, 235, 128), thickness=2
+            cv2.line(frame, pt1, pt2, (0, 235, 128), 2, cv2.LINE_AA)
+
+    # 2. Draw subtle 17 COCO keypoint dots
+    keypoints = getattr(pose, "keypoints", [])
+    for kp in keypoints:
+        if getattr(kp, "confidence", 0.0) >= 0.35 and kp.x_px > 0 and kp.y_px > 0:
+            pt = (int(round(kp.x_px)), int(round(kp.y_px)))
+            # Glowing cyan/yellow dot with subtle darker border
+            cv2.circle(frame, pt, 4, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, pt, 4, (0, 180, 200), 1, cv2.LINE_AA)
+
 
 class SharedFrontCaptureManager:
     """Manages a single OpenCV VideoCapture for Phone 1."""
@@ -49,6 +106,7 @@ class SharedFrontCaptureManager:
         self._lock = threading.Lock()
         self._cap: Optional[cv2.VideoCapture] = None
         self._thread: Optional[threading.Thread] = None
+        self._pose_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._source: Union[int, str] = DEFAULT_FRONT_URL
         self._rotation: int = DEFAULT_ROTATION
@@ -64,6 +122,11 @@ class SharedFrontCaptureManager:
         self._latest_jpeg: Optional[bytes] = None
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_seq: int = 0
+
+        # Live pose tracking state
+        self._pose_lock = threading.Lock()
+        self._current_pose: Optional[Any] = None
+        self._pose_time: float = 0.0
 
         # Recording state
         self._is_recording = False
@@ -123,14 +186,23 @@ class SharedFrontCaptureManager:
             meas_fps = cap.get(cv2.CAP_PROP_FPS)
             self._actual_fps = meas_fps if (meas_fps and meas_fps > 0) else fps
 
+            self._current_pose = None
+            self._pose_time = 0.0
+
             self._cap = cap
             self._thread = threading.Thread(
                 target=self._reader_loop,
                 name="cam-front-shared-reader",
                 daemon=True,
             )
+            self._pose_thread = threading.Thread(
+                target=self._pose_worker_loop,
+                name="cam-front-pose-worker",
+                daemon=True,
+            )
             self._thread.start()
-            logger.info("Shared front camera reader thread started on %s.", source)
+            self._pose_thread.start()
+            logger.info("Shared front camera reader and pose threads started on %s.", source)
             return True
 
     def _reader_loop(self) -> None:
@@ -147,10 +219,19 @@ class SharedFrontCaptureManager:
 
             processed_frame = rotate_frame(frame, self._rotation)
 
+            # Draw subtle pose overlay on a display copy if a valid person is detected
+            display_frame = processed_frame
+            with self._pose_lock:
+                current_pose = self._current_pose if (time.monotonic() - self._pose_time < 0.4) else None
+
+            if current_pose is not None:
+                display_frame = processed_frame.copy()
+                draw_pose_skeleton(display_frame, current_pose)
+
             # Encode JPEG for live browser stream (quality=70 for fast low-latency streaming)
             ret_enc, enc = cv2.imencode(
                 ".jpg",
-                processed_frame,
+                display_frame,
                 [int(cv2.IMWRITE_JPEG_QUALITY), 70],
             )
             jpeg_bytes = enc.tobytes() if ret_enc else None
@@ -160,11 +241,54 @@ class SharedFrontCaptureManager:
                 self._latest_jpeg = jpeg_bytes
                 self._frame_seq += 1
 
-            # If recording is active, write frame and timestamp
+            # If recording is active, write CLEAN un-annotated frame and timestamp
             with self._record_lock:
                 if self._is_recording and self._record_writer is not None:
                     self._record_writer.write(processed_frame)
                     self._record_timestamps.append(time.monotonic() - self._record_start_time)
+
+    def _pose_worker_loop(self) -> None:
+        """Run YOLO11s-Pose inference at a responsive rate on the latest front frame."""
+        detector = None
+        try:
+            from app.pose.pose_detector import PoseDetector
+            detector = PoseDetector(conf_threshold=0.25)
+        except Exception as exc:
+            logger.info("Live pose tracking detector not loaded: %s", exc)
+            return
+
+        last_seq = -1
+        while not self._stop_event.is_set():
+            frame_to_process = None
+            seq_to_process = -1
+            with self._lock:
+                if self._frame_seq != last_seq and self._latest_frame is not None:
+                    frame_to_process = self._latest_frame
+                    seq_to_process = self._frame_seq
+
+            if frame_to_process is None:
+                time.sleep(0.02)
+                continue
+
+            last_seq = seq_to_process
+            try:
+                det_result = detector.detect(frame_to_process)
+                if det_result.persons_detected > 0 and det_result.primary is not None:
+                    if det_result.primary.is_valid_person():
+                        with self._pose_lock:
+                            self._current_pose = det_result.primary
+                            self._pose_time = time.monotonic()
+                    else:
+                        with self._pose_lock:
+                            self._current_pose = None
+                else:
+                    with self._pose_lock:
+                        self._current_pose = None
+            except Exception as exc:
+                logger.debug("Live pose inference error: %s", exc)
+
+            # Cap inference rate to ~15-20 FPS to keep CPU load low and streaming responsive
+            time.sleep(0.05)
 
     def get_latest_jpeg(self) -> Optional[bytes]:
         with self._lock:
@@ -285,11 +409,16 @@ class SharedFrontCaptureManager:
         with self._lock:
             self._stop_event.set()
             thread = self._thread
+            pose_thread = self._pose_thread
             cap = self._cap
             self._thread = None
+            self._pose_thread = None
             self._cap = None
             self._latest_jpeg = None
             self._latest_frame = None
+            with self._pose_lock:
+                self._current_pose = None
+                self._pose_time = 0.0
 
         with self._record_lock:
             self._is_recording = False
@@ -299,6 +428,8 @@ class SharedFrontCaptureManager:
 
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        if pose_thread is not None and pose_thread.is_alive():
+            pose_thread.join(timeout=2.0)
 
         if cap is not None:
             try:

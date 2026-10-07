@@ -492,7 +492,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             );
           }}
           style={{ transform: 'scaleX(-1)' }}
-          className={`w-full h-full object-cover transition-opacity duration-500 ${
+          className={`w-full h-full object-contain aspect-video transition-opacity duration-500 ${
             cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
           }`}
           aria-label="Live fight camera feed from Phone 1"

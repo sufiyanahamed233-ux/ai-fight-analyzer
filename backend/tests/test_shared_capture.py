@@ -205,3 +205,38 @@ class TestSharedFrontCaptureManager:
                 assert b"\xff\xd8" in chunk
             finally:
                 manager.stop()
+
+    def test_draw_pose_skeleton_draws_lines_and_keypoints(self):
+        from app.camera.shared_capture import draw_pose_skeleton
+        from app.pose.pose_detector import COCO_KEYPOINT_NAMES, Keypoint, PoseResult
+
+        kps = [
+            Keypoint(
+                name=name,
+                index=i,
+                x_px=100.0 + i * 5,
+                y_px=150.0 + i * 5,
+                x_norm=0.2,
+                y_norm=0.3,
+                confidence=0.9,
+            )
+            for i, name in enumerate(COCO_KEYPOINT_NAMES)
+        ]
+        pose = PoseResult(
+            person_index=0,
+            bbox_xyxy=(50.0, 50.0, 250.0, 450.0),
+            confidence=0.95,
+            keypoints=kps,
+            image_width=640,
+            image_height=480,
+        )
+
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        assert np.all(frame == 0)
+
+        draw_pose_skeleton(frame, pose)
+        # Frame should now have drawn non-zero pixels
+        assert np.any(frame > 0)
+
+        # None pose should be safe no-op
+        draw_pose_skeleton(frame, None)
