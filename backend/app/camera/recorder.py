@@ -4,10 +4,12 @@ recorder.py
 Dual-camera software-synchronized capture for AI Fight Analyzer.
 
 Responsibilities (this file only):
-  - Open Camera 0 (FRONT) and Camera 1 (SIDE) via OpenCV
-  - Capture frames from both cameras concurrently using threads
+  - Connect to FRONT (http://127.0.0.1:4747/video) and SIDE (http://127.0.0.1:4748/video)
+    MJPEG streams via OpenCV (or fallback camera indexes/devices)
+  - Capture frames from both cameras concurrently using independent reader threads
+  - Apply configurable per-camera rotation (default 90 degrees for portrait-mounted phones)
   - Attach a monotonic software timestamp to every frame
-  - Write each camera stream to its own video file (AVI/XVID)
+  - Write each camera stream to its own video file (AVI/XVID) with updated dimensions
   - Save per-camera timestamp manifests so the pose layer can align frames
   - Release both cameras cleanly under all failure conditions
 
@@ -20,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tempfile
 import threading
 import time
@@ -28,24 +31,50 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Union
 
 import cv2
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants & Defaults
 # ---------------------------------------------------------------------------
 
-TARGET_WIDTH: int = 640
-TARGET_HEIGHT: int = 480
+DEFAULT_FRONT_URL: str = os.getenv("DROIDCAM_FRONT_URL", "http://127.0.0.1:4747/video")
+DEFAULT_SIDE_URL: str = os.getenv("DROIDCAM_SIDE_URL", "http://127.0.0.1:4748/video")
+
+TARGET_WIDTH: int = 1280
+TARGET_HEIGHT: int = 720
 TARGET_FPS: float = 30.0
+DEFAULT_ROTATION: int = 90  # 90 degrees clockwise (portrait phone mount)
 DEFAULT_DURATION: float = 10.0
 _FOURCC = cv2.VideoWriter_fourcc(*"XVID")  # type: ignore[attr-defined]
 
 # How long (seconds) to wait for a camera thread to finish after stop signal.
 _THREAD_JOIN_TIMEOUT: float = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Helper functions
+# ---------------------------------------------------------------------------
+
+
+def rotate_frame(frame: Any, rotation: int) -> Any:
+    """Rotate a frame by 0, 90, 180, or 270 degrees clockwise.
+
+    Gracefully passes through non-numpy objects (such as test mocks) and rotation=0.
+    """
+    if not isinstance(frame, np.ndarray) or rotation == 0:
+        return frame
+    if rotation == 90:
+        return cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+    elif rotation == 180:
+        return cv2.rotate(frame, cv2.ROTATE_180)
+    elif rotation == 270:
+        return cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return frame
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +91,24 @@ class CameraRole(str, Enum):
 class CameraConfig:
     """Configuration for one camera in a dual-capture session."""
 
-    index: int
-    role: CameraRole
+    source: Union[int, str] = DEFAULT_FRONT_URL
+    role: CameraRole = CameraRole.FRONT
     width: int = TARGET_WIDTH
     height: int = TARGET_HEIGHT
     fps: float = TARGET_FPS
+    rotation: int = DEFAULT_ROTATION
+    index: Optional[Union[int, str]] = None
+
+    def __post_init__(self) -> None:
+        # If legacy index was provided and source was left at default, use index as source
+        if self.index is not None and (
+            self.source == DEFAULT_FRONT_URL
+            or self.source == 0
+            or self.source is None
+        ):
+            self.source = self.index
+        elif self.index is None:
+            self.index = self.source
 
 
 @dataclass
@@ -74,13 +116,15 @@ class CameraResult:
     """Outcome of recording from a single camera."""
 
     role: CameraRole
-    index: int
+    index: Union[int, str] = 0
+    source: Union[int, str] = 0
     frame_count: int = 0
     video_path: Optional[Path] = None
     timestamps_path: Optional[Path] = None  # JSON manifest of per-frame timestamps
     actual_width: int = 0
     actual_height: int = 0
     actual_fps: float = 0.0
+    rotation: int = 0
     error: Optional[str] = None
 
     @property
@@ -114,13 +158,24 @@ class RecordingSession:
 # ---------------------------------------------------------------------------
 
 
-def _open_capture(index: int) -> cv2.VideoCapture:  # type: ignore[name-defined]
-    """Try CAP_DSHOW first (Windows), fall back to default backend."""
-    cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        cap.release()
-        cap = cv2.VideoCapture(index)
-    return cap
+def _open_capture(source: Union[int, str]) -> cv2.VideoCapture:  # type: ignore[name-defined]
+    """Open camera source: MJPEG HTTP URL or camera index with DirectShow fallback."""
+    if isinstance(source, str) and (
+        source.startswith("http://")
+        or source.startswith("https://")
+        or source.startswith("rtsp://")
+    ):
+        return cv2.VideoCapture(source)
+
+    if isinstance(source, int) or (isinstance(source, str) and source.isdigit()):
+        idx = int(source)
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            cap.release()
+            cap = cv2.VideoCapture(idx)
+        return cap
+
+    return cv2.VideoCapture(source)
 
 
 def _run_camera_worker(
@@ -132,34 +187,45 @@ def _run_camera_worker(
 ) -> None:
     """
     Thread target: continuously read frames from one camera until *stop_event*
-    is set, write them to a VideoWriter, and record per-frame timestamps.
+    is set, apply rotation, write to a VideoWriter, and record per-frame timestamps.
 
     Results are deposited into *out[config.role]* as a :class:`CameraResult`.
     """
-    result = CameraResult(role=config.role, index=config.index)
-    cap = _open_capture(config.index)
+    result = CameraResult(
+        role=config.role,
+        index=config.index if config.index is not None else config.source,
+        source=config.source,
+        rotation=config.rotation,
+    )
+    cap = _open_capture(config.source)
 
     if not cap.isOpened():
-        result.error = f"Could not open camera {config.index} ({config.role.value})"
+        result.error = f"Could not open camera {config.source} ({config.role.value})"
         out[config.role] = result
         logger.error(result.error)
         return
 
-    # Request target resolution / fps (best-effort — camera may ignore it).
+    # Request target resolution / fps (best-effort — stream/driver may ignore it).
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
     cap.set(cv2.CAP_PROP_FPS, config.fps)
 
-    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    raw_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or config.width
+    raw_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or config.height
     actual_fps = cap.get(cv2.CAP_PROP_FPS) or config.fps
 
-    result.actual_width = actual_w
-    result.actual_height = actual_h
+    # Swap output width and height when rotating by 90 or 270 degrees
+    if config.rotation in (90, 270):
+        writer_w, writer_h = raw_h, raw_w
+    else:
+        writer_w, writer_h = raw_w, raw_h
+
+    result.actual_width = writer_w
+    result.actual_height = writer_h
     result.actual_fps = actual_fps
 
     video_path = session_dir / f"{config.role.value}_{ts_prefix}.avi"
-    writer = cv2.VideoWriter(str(video_path), _FOURCC, config.fps, (actual_w, actual_h))
+    writer = cv2.VideoWriter(str(video_path), _FOURCC, config.fps, (writer_w, writer_h))
 
     timestamps: list[float] = []  # monotonic seconds relative to session start
 
@@ -169,9 +235,11 @@ def _run_camera_worker(
         while not stop_event.is_set():
             ret, frame = cap.read()
             if not ret or frame is None:
-                logger.debug("Camera %d (%s): missed frame", config.index, config.role.value)
+                logger.debug("Camera %s (%s): missed frame", config.source, config.role.value)
                 continue
-            writer.write(frame)
+
+            processed_frame = rotate_frame(frame, config.rotation)
+            writer.write(processed_frame)
             timestamps.append(time.monotonic() - t_start)
     finally:
         cap.release()
@@ -185,7 +253,9 @@ def _run_camera_worker(
             json.dumps(
                 {
                     "role": config.role.value,
+                    "source": str(config.source),
                     "camera_index": config.index,
+                    "rotation": config.rotation,
                     "frame_count": len(timestamps),
                     "timestamps_s": timestamps,
                 }
@@ -198,11 +268,12 @@ def _run_camera_worker(
     out[config.role] = result
 
     logger.info(
-        "Camera %d (%s): %d frames in %.2fs",
-        config.index,
+        "Camera %s (%s): %d frames in %.2fs (rotation=%d°)",
+        config.source,
         config.role.value,
         len(timestamps),
         timestamps[-1] if timestamps else 0.0,
+        config.rotation,
     )
 
 
@@ -214,6 +285,11 @@ def _run_camera_worker(
 class DualCameraRecorder:
     """
     Software-synchronized dual-camera recorder.
+
+    Supports both DroidCam MJPEG streams (defaulting to http://127.0.0.1:4747/video
+    and http://127.0.0.1:4748/video) and local camera indexes.
+    Each camera runs in an independent thread so network stalls in one stream
+    cannot block or degrade the other.
 
     Usage (sync — safe to run in a thread pool from async FastAPI code)::
 
@@ -231,19 +307,38 @@ class DualCameraRecorder:
 
     def __init__(
         self,
-        front_index: int = 0,
-        side_index: int = 1,
+        front_source: Union[int, str] = DEFAULT_FRONT_URL,
+        side_source: Union[int, str] = DEFAULT_SIDE_URL,
         duration: float = DEFAULT_DURATION,
         width: int = TARGET_WIDTH,
         height: int = TARGET_HEIGHT,
         fps: float = TARGET_FPS,
         output_dir: Optional[Path] = None,
+        front_rotation: int = DEFAULT_ROTATION,
+        side_rotation: int = DEFAULT_ROTATION,
+        front_index: Optional[Union[int, str]] = None,
+        side_index: Optional[Union[int, str]] = None,
     ) -> None:
+        actual_front = front_index if front_index is not None else front_source
+        actual_side = side_index if side_index is not None else side_source
+
         self.front_config = CameraConfig(
-            index=front_index, role=CameraRole.FRONT, width=width, height=height, fps=fps
+            source=actual_front,
+            role=CameraRole.FRONT,
+            width=width,
+            height=height,
+            fps=fps,
+            rotation=front_rotation,
+            index=actual_front,
         )
         self.side_config = CameraConfig(
-            index=side_index, role=CameraRole.SIDE, width=width, height=height, fps=fps
+            source=actual_side,
+            role=CameraRole.SIDE,
+            width=width,
+            height=height,
+            fps=fps,
+            rotation=side_rotation,
+            index=actual_side,
         )
         self.duration = duration
         self._base_output_dir = output_dir or Path(tempfile.gettempdir()) / "ai_fight_sessions"
@@ -274,18 +369,24 @@ class DualCameraRecorder:
         front_thread = threading.Thread(
             target=_run_camera_worker,
             args=(self.front_config, stop_event, session_dir, ts_prefix, out),
-            name="cam-front",
+            name="cam-front-reader",
             daemon=True,
         )
         side_thread = threading.Thread(
             target=_run_camera_worker,
             args=(self.side_config, stop_event, session_dir, ts_prefix, out),
-            name="cam-side",
+            name="cam-side-reader",
             daemon=True,
         )
 
         t_start = time.monotonic()
-        logger.info("Recording session %s starting (%.1fs)…", session_id, self.duration)
+        logger.info(
+            "Recording session %s starting (%.1fs) [Front: %s, Side: %s]…",
+            session_id,
+            self.duration,
+            self.front_config.source,
+            self.side_config.source,
+        )
 
         front_thread.start()
         side_thread.start()
@@ -301,12 +402,16 @@ class DualCameraRecorder:
         # Fill in a failure result for any camera that never reported back.
         _fallback_front = CameraResult(
             role=CameraRole.FRONT,
-            index=self.front_config.index,
+            index=self.front_config.index if self.front_config.index is not None else self.front_config.source,
+            source=self.front_config.source,
+            rotation=self.front_config.rotation,
             error="Camera thread did not report a result",
         )
         _fallback_side = CameraResult(
             role=CameraRole.SIDE,
-            index=self.side_config.index,
+            index=self.side_config.index if self.side_config.index is not None else self.side_config.source,
+            source=self.side_config.source,
+            rotation=self.side_config.rotation,
             error="Camera thread did not report a result",
         )
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 
@@ -30,15 +30,20 @@ _CONSECUTIVE_FAIL_LIMIT: int = 3
 
 @dataclass
 class CameraInfo:
-    """Result of probing a single camera index."""
+    """Result of probing a single camera index or stream URL."""
 
     index: int
     available: bool
+    source: Optional[Union[int, str]] = None
     frame_read: bool = False
     width: Optional[float] = None
     height: Optional[float] = None
     backend: Optional[str] = None
     error: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.source is None:
+            self.source = self.index
 
 
 @dataclass
@@ -145,3 +150,90 @@ def discover_cameras(
                 break
 
     return result
+
+
+def probe_stream(url: str) -> CameraInfo:
+    """
+    Open an MJPEG stream URL (e.g. DroidCam), attempt to read one frame, then release.
+
+    Parameters
+    ----------
+    url:
+        MJPEG stream URL (e.g. 'http://127.0.0.1:4747/video').
+
+    Returns
+    -------
+    CameraInfo
+        Populated with stream availability and frame data.
+    """
+    cap = cv2.VideoCapture(url)
+    if not cap.isOpened():
+        return CameraInfo(
+            index=-1,
+            source=url,
+            available=False,
+            error=f"Could not open stream URL: {url}",
+        )
+
+    ret, frame = cap.read()
+    frame_ok = ret and frame is not None and frame.size > 0
+
+    info = CameraInfo(
+        index=-1,
+        source=url,
+        available=True,
+        frame_read=frame_ok,
+        width=cap.get(cv2.CAP_PROP_FRAME_WIDTH) or None,
+        height=cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or None,
+        backend=str(cap.getBackendName()),
+        error=None if frame_ok else "Opened stream but could not read a frame",
+    )
+    cap.release()
+    logger.debug("Stream %s: available=%s frame_read=%s", url, info.available, info.frame_read)
+    return info
+
+
+def check_droidcam_port(host: str = "127.0.0.1", port: int = 4747, timeout_sec: float = 0.5) -> bool:
+    """
+    Check if a DroidCam TCP port is open (modular hook for ADB port-forwarding).
+
+    Parameters
+    ----------
+    host:
+        IP address (default: '127.0.0.1').
+    port:
+        Port number (e.g., 4747 or 4748).
+    timeout_sec:
+        Socket connect timeout in seconds.
+
+    Returns
+    -------
+    bool
+        True if connection succeeded, False otherwise.
+    """
+    import socket
+
+    try:
+        with socket.create_connection((host, port), timeout=timeout_sec):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
+def discover_droidcam_streams(
+    front_url: str = "http://127.0.0.1:4747/video",
+    side_url: str = "http://127.0.0.1:4748/video",
+) -> dict[str, CameraInfo]:
+    """
+    Probe standard DroidCam FRONT and SIDE MJPEG endpoints.
+
+    Returns
+    -------
+    dict[str, CameraInfo]
+        Mapping of 'front' and 'side' to CameraInfo.
+    """
+    return {
+        "front": probe_stream(front_url),
+        "side": probe_stream(side_url),
+    }
+

@@ -157,3 +157,60 @@ class TestDiscoverCameras:
             result = discover_cameras(max_index=2, consecutive_fail_limit=10)
 
         assert isinstance(result, DiscoveryResult)
+
+
+# ---------------------------------------------------------------------------
+# Stream and DroidCam Discovery Tests
+# ---------------------------------------------------------------------------
+
+class TestStreamDiscovery:
+    def test_probe_stream_success(self):
+        from app.camera.camera_manager import probe_stream
+
+        cap = _make_cap(opened=True, read_ok=True)
+        with patch("app.camera.camera_manager.cv2.VideoCapture", return_value=cap):
+            info = probe_stream("http://127.0.0.1:4747/video")
+
+        assert info.available is True
+        assert info.frame_read is True
+        assert info.source == "http://127.0.0.1:4747/video"
+        cap.release.assert_called_once()
+
+    def test_probe_stream_failure(self):
+        from app.camera.camera_manager import probe_stream
+
+        cap = _make_cap(opened=False)
+        with patch("app.camera.camera_manager.cv2.VideoCapture", return_value=cap):
+            info = probe_stream("http://127.0.0.1:4747/video")
+
+        assert info.available is False
+        assert info.frame_read is False
+        assert "Could not open" in (info.error or "")
+
+    def test_check_droidcam_port_success(self):
+        from app.camera.camera_manager import check_droidcam_port
+
+        with patch("socket.create_connection") as mock_conn:
+            mock_conn.return_value.__enter__.return_value = MagicMock()
+            assert check_droidcam_port("127.0.0.1", 4747) is True
+
+    def test_check_droidcam_port_failure(self):
+        from app.camera.camera_manager import check_droidcam_port
+
+        with patch("socket.create_connection", side_effect=OSError("Connection refused")):
+            assert check_droidcam_port("127.0.0.1", 4747) is False
+
+    def test_discover_droidcam_streams(self):
+        from app.camera.camera_manager import discover_droidcam_streams
+
+        cap1 = _make_cap(opened=True, read_ok=True)
+        cap2 = _make_cap(opened=True, read_ok=True)
+
+        with patch("app.camera.camera_manager.cv2.VideoCapture", side_effect=[cap1, cap2]):
+            streams = discover_droidcam_streams()
+
+        assert "front" in streams
+        assert "side" in streams
+        assert streams["front"].available is True
+        assert streams["side"].available is True
+

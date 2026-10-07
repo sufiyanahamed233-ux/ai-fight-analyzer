@@ -22,3 +22,7 @@ backend/samples/
 
 # Environment configs
 .env
+
+# Python generated files
+__pycache__/
+*.py[cod]

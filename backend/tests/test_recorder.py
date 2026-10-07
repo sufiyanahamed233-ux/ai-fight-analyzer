@@ -320,3 +320,83 @@ class TestDualCameraRecorder:
 
         # Should parse without raising
         datetime.fromisoformat(session.started_at.replace("Z", "+00:00"))
+
+    def test_default_sources_and_rotation(self):
+        from app.camera.recorder import DEFAULT_FRONT_URL, DEFAULT_SIDE_URL, DEFAULT_ROTATION
+
+        recorder = DualCameraRecorder()
+        assert recorder.front_config.source == DEFAULT_FRONT_URL
+        assert recorder.side_config.source == DEFAULT_SIDE_URL
+        assert recorder.front_config.rotation == DEFAULT_ROTATION
+        assert recorder.side_config.rotation == DEFAULT_ROTATION
+        assert recorder.front_config.width == 1280
+        assert recorder.front_config.height == 720
+
+    def test_custom_source_and_rotation_override(self):
+        recorder = DualCameraRecorder(
+            front_source="http://192.168.1.50:4747/video",
+            side_source="http://192.168.1.51:4748/video",
+            front_rotation=0,
+            side_rotation=270,
+        )
+        assert recorder.front_config.source == "http://192.168.1.50:4747/video"
+        assert recorder.side_config.source == "http://192.168.1.51:4748/video"
+        assert recorder.front_config.rotation == 0
+        assert recorder.side_config.rotation == 270
+
+
+# ---------------------------------------------------------------------------
+# Rotation and Stream Opening Tests
+# ---------------------------------------------------------------------------
+
+class TestRotationAndStream:
+    def test_rotate_frame_numpy(self):
+        import numpy as np
+        from app.camera.recorder import rotate_frame
+
+        # Create a 720x1280 dummy frame (height=720, width=1280)
+        img = np.zeros((720, 1280, 3), dtype=np.uint8)
+
+        # 90 degrees clockwise -> height=1280, width=720
+        r90 = rotate_frame(img, 90)
+        assert r90.shape == (1280, 720, 3)
+
+        # 180 degrees -> preserves shape
+        r180 = rotate_frame(img, 180)
+        assert r180.shape == (720, 1280, 3)
+
+        # 270 degrees -> height=1280, width=720
+        r270 = rotate_frame(img, 270)
+        assert r270.shape == (1280, 720, 3)
+
+        # 0 degrees -> unchanged
+        r0 = rotate_frame(img, 0)
+        assert r0.shape == (720, 1280, 3)
+
+    def test_rotate_frame_non_numpy(self):
+        from app.camera.recorder import rotate_frame
+
+        mock_obj = MagicMock()
+        # Should return the mock object untouched without raising
+        result = rotate_frame(mock_obj, 90)
+        assert result is mock_obj
+
+    def test_open_capture_url_calls_videocapture_without_backend(self):
+        from app.camera.recorder import _open_capture
+
+        with patch("app.camera.recorder.cv2.VideoCapture") as mock_vc:
+            _open_capture("http://127.0.0.1:4747/video")
+            mock_vc.assert_called_once_with("http://127.0.0.1:4747/video")
+
+    def test_open_capture_numeric_uses_dshow_fallback(self):
+        from app.camera.recorder import _open_capture
+        import cv2
+
+        with patch("app.camera.recorder.cv2.VideoCapture") as mock_vc:
+            cap_instance = MagicMock()
+            cap_instance.isOpened.return_value = True
+            mock_vc.return_value = cap_instance
+
+            _open_capture(0)
+            mock_vc.assert_called_with(0, cv2.CAP_DSHOW)
+
