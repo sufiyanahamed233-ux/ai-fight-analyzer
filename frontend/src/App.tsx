@@ -4,6 +4,7 @@ import { WelcomeScreen } from './screens/WelcomeScreen.tsx';
 import { CalibrationScreen } from './screens/CalibrationScreen.tsx';
 import { InstructionsScreen } from './screens/InstructionsScreen.tsx';
 import { CountdownScreen } from './screens/CountdownScreen.tsx';
+import { LiveFightScreen } from './screens/LiveFightScreen.tsx';
 import {
   ExhibitionState,
   EXHIBITION_FLOW_SEQUENCE,
@@ -46,10 +47,15 @@ export default function App() {
         />
       )}
 
+      {currentState === ExhibitionState.FIGHT && (
+        <LiveFightScreen />
+      )}
+
       {currentState !== ExhibitionState.WELCOME &&
         currentState !== ExhibitionState.CALIBRATION &&
         currentState !== ExhibitionState.INSTRUCTIONS &&
-        currentState !== ExhibitionState.COUNTDOWN && (
+        currentState !== ExhibitionState.COUNTDOWN &&
+        currentState !== ExhibitionState.FIGHT && (
           /* Holding container for subsequent states (COUNTDOWN, FIGHT, etc.) */
           <div className="flex flex-col items-center justify-center text-center space-y-6 max-w-2xl px-4 py-8">
             <div className="px-4 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs font-mono uppercase tracking-[0.2em] text-neutral-400">
