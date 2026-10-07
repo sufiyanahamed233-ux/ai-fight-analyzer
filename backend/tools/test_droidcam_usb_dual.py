@@ -21,7 +21,12 @@ import os
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Tuple
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
 
 # Suppress noisy OpenCV logs
 os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
@@ -266,11 +271,26 @@ def create_placeholder_frame(
 
 
 def main() -> None:
+    import argparse
+    parser = argparse.ArgumentParser(description="AI Fight Analyzer - Dual DroidCam USB Diagnostic")
+    parser.add_argument("--adb", action="store_true", help="Automatically configure ADB USB port forwarding before starting")
+    args, _ = parser.parse_known_args()
+
     print("=" * 68)
     print("AI Fight Analyzer - Dual DroidCam USB MJPEG Diagnostic")
     print(f"  Camera 1 URL : {CAM1_URL}")
     print(f"  Camera 2 URL : {CAM2_URL}")
     print("=" * 68)
+
+    if args.adb:
+        from app.camera.adb_forwarder import setup_dual_droidcam_usb
+        print("[INFO] Automatically configuring USB ADB port forwards...")
+        try:
+            setup_dual_droidcam_usb(verify_streams=False)
+            print("[INFO] ADB port forwards configured successfully.")
+        except Exception as exc:
+            print(f"[WARN] ADB forward auto-configuration failed: {exc}")
+
     print("[INFO] Initializing stream readers...")
 
     cam1 = CameraStreamReader("Camera 1", CAM1_URL)
