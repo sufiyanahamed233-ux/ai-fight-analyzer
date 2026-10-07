@@ -48,7 +48,9 @@ export default function App() {
       )}
 
       {currentState === ExhibitionState.FIGHT && (
-        <LiveFightScreen />
+        <LiveFightScreen
+          onFightComplete={() => goToState(ExhibitionState.PROCESSING)}
+        />
       )}
 
       {currentState !== ExhibitionState.WELCOME &&
