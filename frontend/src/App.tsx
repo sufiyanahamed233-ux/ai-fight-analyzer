@@ -1,4 +1,5 @@
 import { useState, useCallback } from 'react';
+import { DasaraIntroScreen } from './components/DasaraIntroScreen.tsx';
 import { ExhibitionShell } from './components/ExhibitionShell.tsx';
 import { WelcomeScreen } from './screens/WelcomeScreen.tsx';
 import { CalibrationScreen } from './screens/CalibrationScreen.tsx';
@@ -14,22 +15,25 @@ import {
 } from './types/exhibition.ts';
 import type { FightObservationResult } from './types/analysis.ts';
 
+// Internal-only phase for the Dasara intro (not part of the public ExhibitionState enum)
+type AppPhase = 'DASARA_INTRO' | ExhibitionState;
+
 export default function App() {
-  const [currentState, setCurrentState] = useState<ExhibitionState>(
-    ExhibitionState.WELCOME
-  );
+  const [phase, setPhase] = useState<AppPhase>('DASARA_INTRO');
   const [analysisResult, setAnalysisResult] =
     useState<FightObservationResult | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
+  const currentState = phase as ExhibitionState;
+
   const goToState = useCallback((state: ExhibitionState) => {
-    setCurrentState(state);
+    setPhase(state);
   }, []);
 
   const resetToWelcome = useCallback(() => {
     setAnalysisResult(null);
     setAnalysisError(null);
-    setCurrentState(ExhibitionState.WELCOME);
+    setPhase(ExhibitionState.WELCOME);
   }, []);
 
   const handleFightComplete = useCallback(
@@ -47,6 +51,15 @@ export default function App() {
   const handleFightError = useCallback((error: string) => {
     setAnalysisError(error);
   }, []);
+
+  // Dasara intro rendered as full-viewport takeover before Welcome screen
+  if (phase === 'DASARA_INTRO') {
+    return (
+      <DasaraIntroScreen
+        onComplete={() => setPhase(ExhibitionState.WELCOME)}
+      />
+    );
+  }
 
   return (
     <ExhibitionShell currentState={currentState}>

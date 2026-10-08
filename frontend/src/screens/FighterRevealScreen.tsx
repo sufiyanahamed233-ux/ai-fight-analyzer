@@ -98,7 +98,7 @@ export const FighterRevealScreen: React.FC<FighterRevealScreenProps> = ({
 
       {/* Step 2: Full-screen fighter image reveal */}
       {phase === 'reveal' && (
-        <div className="relative z-10 w-full h-full flex flex-col items-center justify-center p-2 sm:p-6">
+        <div className="relative z-10 w-full h-full min-w-0 flex flex-col items-center justify-center p-2 sm:p-6">
           {!allImagesFailed ? (
             <img
               src={candidatePaths[candidateIdx]}
@@ -118,12 +118,18 @@ export const FighterRevealScreen: React.FC<FighterRevealScreenProps> = ({
               }`}
             />
           ) : (
-            /* Fallback only if the image file has not been copied to public/fighters/ yet */
-            <div className="flex flex-col items-center justify-center space-y-4 max-w-lg p-8 rounded-3xl bg-neutral-950/90 border border-neutral-800 text-center">
+            /* Fallback with responsive typography preventing overflow on long names */
+            <div className="flex flex-col items-center justify-center space-y-4 w-full max-w-lg min-w-0 p-8 rounded-3xl bg-neutral-950/90 border border-neutral-800 text-center">
               <span className="text-xs font-mono uppercase tracking-[0.2em] text-red-500 font-bold">
                 Fighter Match
               </span>
-              <h2 className="text-4xl sm:text-6xl font-black uppercase text-white tracking-tight">
+              <h2
+                className={`font-black uppercase tracking-tight text-white drop-shadow-[0_4px_30px_rgba(220,38,38,0.5)] leading-[0.95] break-words w-full min-w-0 ${
+                  fighter.name.length > 12
+                    ? 'text-3xl sm:text-5xl' // Slightly smaller for long names (e.g. Alexander Volkanovski)
+                    : 'text-4xl sm:text-6xl' // Standard size for shorter names (e.g. Jon Jones)
+                }`}
+              >
                 {fighter.name}
               </h2>
               <p className="text-xs font-mono text-neutral-500">
