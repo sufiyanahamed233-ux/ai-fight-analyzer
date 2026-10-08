@@ -1,4 +1,7 @@
 import React, { useEffect, useRef } from 'react';
+import { CinematicArenaBackground } from '../components/CinematicArenaBackground';
+import { ArenaHeader } from '../components/ArenaHUD';
+import { CinematicPanel } from '../components/CinematicPanel';
 
 interface InstructionsScreenProps {
   onComplete: () => void;
@@ -9,13 +12,9 @@ interface InstructionsScreenProps {
 /**
  * InstructionsScreen: Phase 5 Participant Pre-Fight Directives
  *
- * Displays exactly:
- * - Title: GET READY
- * - Instruction 1: Stay inside the marked square.
- * - Instruction 2: Perform your fighting movements naturally.
- * - Instruction 3: You have 10 seconds.
- *
- * Automatically triggers onComplete() after a reasonable presentation window.
+ * Visual layout matching the reference design:
+ * - Left side: Boxer silhouette in guard stance with red rim lighting and red gloves
+ * - Right side: Title "FIGHT INSTRUCTIONS", 4 numbered broadcast cards, and red "READY →" button
  */
 export const InstructionsScreen: React.FC<InstructionsScreenProps> = ({
   onComplete,
@@ -34,57 +33,100 @@ export const InstructionsScreen: React.FC<InstructionsScreenProps> = ({
 
   const instructions = [
     {
-      num: '01',
-      text: 'Stay inside the marked square.',
+      num: '1',
+      title: 'STAND IN THE BOX',
+      desc: 'Position yourself inside the marked octagon fight square.',
+      icon: '📐',
     },
     {
-      num: '02',
-      text: 'Perform your fighting movements naturally.',
+      num: '2',
+      title: 'THROW NATURAL PUNCHES',
+      desc: 'Perform jabs, hooks, and combinations naturally toward the camera.',
+      icon: '🥊',
     },
     {
-      num: '03',
-      text: 'You have 10 seconds.',
+      num: '3',
+      title: 'FIGHT FOR 10 SECONDS',
+      desc: 'Demonstrate your fighting style while the AR round timer is active.',
+      icon: '⏱️',
+    },
+    {
+      num: '4',
+      title: 'GET YOUR AI FIGHTER TYPE',
+      desc: 'Receive AI kinematic analysis and discover your UFC fighter match.',
+      icon: '🧠',
     },
   ];
 
   return (
-    <div className="w-full flex-1 flex flex-col items-center justify-center text-center px-4 py-8 select-none">
-      <div className="max-w-4xl mx-auto flex flex-col items-center space-y-10 sm:space-y-12">
-        {/* Stage Status Badge */}
-        <div className="inline-flex items-center gap-3 px-5 py-2 rounded-full bg-neutral-900/90 border border-neutral-800 text-xs sm:text-sm font-mono uppercase tracking-[0.3em] text-neutral-400">
-          <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-pulse" />
-          <span>Stage 03 // Instructions</span>
-        </div>
+    <CinematicArenaBackground variant="instructions">
+      <ArenaHeader stageNumber="03" stageTitle="EXHIBITION DIRECTIVES" />
 
-        {/* Primary Title */}
-        <h1 className="text-6xl sm:text-7xl md:text-8xl lg:text-9xl font-black uppercase tracking-tight text-white drop-shadow-[0_10px_35px_rgba(0,0,0,0.9)] leading-none">
-          GET <span className="text-red-600">READY</span>
-        </h1>
+      <div className="w-full flex-1 flex flex-col items-center justify-between px-6 py-6 select-none overflow-y-auto">
+        <div className="w-full max-w-5xl mx-auto flex flex-col items-start my-auto">
 
-        {/* Instructions Stack */}
-        <div className="w-full max-w-2xl space-y-4 text-left">
-          {instructions.map((item) => (
-            <div
-              key={item.num}
-              className="flex items-center gap-6 px-6 sm:px-8 py-5 sm:py-6 rounded-xl bg-neutral-950/80 border border-neutral-800/90 border-l-4 border-l-red-600 shadow-xl"
-            >
-              <span className="text-xl sm:text-2xl font-mono font-black text-red-500 tracking-wider">
-                {item.num}
-              </span>
-              <p className="text-xl sm:text-2xl md:text-3xl font-medium text-neutral-100 tracking-wide">
-                {item.text}
+          {/* Instruction Panels & Action */}
+          <div className="w-full flex flex-col items-start space-y-6 text-left">
+            
+            {/* Title */}
+            <div className="space-y-1">
+              <h1 className="text-4xl sm:text-6xl font-black uppercase tracking-tight leading-none">
+                <span className="text-white drop-shadow-[0_10px_35px_rgba(255,255,255,0.2)]">GET</span> <span className="text-[#E10600] drop-shadow-[0_0_35px_rgba(225,6,0,0.8)]">READY</span>
+              </h1>
+              <p className="text-xs sm:text-sm font-mono uppercase tracking-widest text-neutral-400">
+                Follow directives before entering the exhibition round
               </p>
             </div>
-          ))}
-        </div>
 
-        {/* Pacing Indicator */}
-        <div className="pt-2">
-          <span className="text-xs font-mono tracking-widest text-neutral-500 uppercase">
-            Advancing to countdown...
-          </span>
+            {/* 4 Instruction Cards Grid */}
+            <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {instructions.map((item, idx) => (
+                <div
+                  key={item.num}
+                  className="animate-in fade-in slide-in-from-bottom-4 duration-500"
+                  style={{ animationDelay: `${idx * 120}ms` }}
+                >
+                  <CinematicPanel glowColor="red" className="h-full flex flex-col justify-between hover:border-red-600/70 p-5">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xl sm:text-2xl font-mono font-black text-red-500 tracking-wider">
+                        {item.num}
+                      </span>
+                      <span className="text-2xl">{item.icon}</span>
+                    </div>
+
+                    <div className="space-y-1">
+                      <h2 className="text-base sm:text-lg font-black uppercase tracking-wide text-white">
+                        {item.title}
+                      </h2>
+                      <p className="text-xs text-neutral-300 font-sans leading-relaxed">
+                        {item.desc}
+                      </p>
+                    </div>
+                  </CinematicPanel>
+                </div>
+              ))}
+            </div>
+
+            {/* Ready Action Button */}
+            <div className="pt-2 w-full flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-mono tracking-widest text-neutral-400 uppercase">
+                <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                <span>Round Armed • Ready</span>
+              </div>
+
+              <button
+                type="button"
+                onClick={onComplete}
+                className="px-8 py-3.5 rounded-xl text-sm font-mono font-bold tracking-widest uppercase bg-[#E10600] hover:bg-red-700 text-white shadow-[0_0_30px_rgba(225,6,0,0.6)] transition-all cursor-pointer"
+              >
+                READY →
+              </button>
+            </div>
+
+          </div>
+
         </div>
       </div>
-    </div>
+    </CinematicArenaBackground>
   );
 };

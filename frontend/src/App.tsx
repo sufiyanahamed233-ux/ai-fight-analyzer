@@ -1,27 +1,66 @@
 import { useState, useCallback } from 'react';
+import { DasaraIntroScreen } from './components/DasaraIntroScreen.tsx';
 import { ExhibitionShell } from './components/ExhibitionShell.tsx';
 import { WelcomeScreen } from './screens/WelcomeScreen.tsx';
 import { CalibrationScreen } from './screens/CalibrationScreen.tsx';
 import { InstructionsScreen } from './screens/InstructionsScreen.tsx';
 import { CountdownScreen } from './screens/CountdownScreen.tsx';
 import { LiveFightScreen } from './screens/LiveFightScreen.tsx';
+import { ProcessingScreen } from './screens/ProcessingScreen.tsx';
+import { ReviewScreen } from './screens/ReviewScreen.tsx';
+import { FighterRevealScreen } from './screens/FighterRevealScreen.tsx';
 import {
   ExhibitionState,
   EXHIBITION_FLOW_SEQUENCE,
 } from './types/exhibition.ts';
+import type { FightObservationResult } from './types/analysis.ts';
+
+// Internal-only state for the Dasara intro (not part of the public ExhibitionState enum)
+type AppPhase = 'DASARA_INTRO' | ExhibitionState;
 
 export default function App() {
-  const [currentState, setCurrentState] = useState<ExhibitionState>(
-    ExhibitionState.WELCOME
-  );
+  // Start with Dasara intro; it fires onComplete → WELCOME
+  const [phase, setPhase] = useState<AppPhase>('DASARA_INTRO');
+  const [analysisResult, setAnalysisResult] =
+    useState<FightObservationResult | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+  const currentState = phase as ExhibitionState; // safe after intro
 
   const goToState = useCallback((state: ExhibitionState) => {
-    setCurrentState(state);
+    setPhase(state);
   }, []);
 
   const resetToWelcome = useCallback(() => {
-    setCurrentState(ExhibitionState.WELCOME);
+    setAnalysisResult(null);
+    setAnalysisError(null);
+    setPhase(ExhibitionState.WELCOME);
   }, []);
+
+  const handleFightComplete = useCallback(
+    (result: FightObservationResult) => {
+      setAnalysisResult(result);
+      goToState(ExhibitionState.PROCESSING);
+    },
+    [goToState]
+  );
+
+  const handleFightProcessing = useCallback(() => {
+    goToState(ExhibitionState.PROCESSING);
+  }, [goToState]);
+
+  const handleFightError = useCallback((error: string) => {
+    setAnalysisError(error);
+  }, []);
+
+  // ── Dasara intro is rendered outside ExhibitionShell (full-viewport takeover) ──
+  if (phase === 'DASARA_INTRO') {
+    return (
+      <DasaraIntroScreen
+        onComplete={() => setPhase(ExhibitionState.WELCOME)}
+      />
+    );
+  }
 
   return (
     <ExhibitionShell currentState={currentState}>
@@ -49,58 +88,56 @@ export default function App() {
 
       {currentState === ExhibitionState.FIGHT && (
         <LiveFightScreen
-          onFightComplete={() => goToState(ExhibitionState.PROCESSING)}
+          durationSecs={10}
+          onProcessing={handleFightProcessing}
+          onComplete={handleFightComplete}
+          onError={handleFightError}
         />
       )}
 
-      {currentState !== ExhibitionState.WELCOME &&
-        currentState !== ExhibitionState.CALIBRATION &&
-        currentState !== ExhibitionState.INSTRUCTIONS &&
-        currentState !== ExhibitionState.COUNTDOWN &&
-        currentState !== ExhibitionState.FIGHT && (
-          /* Holding container for subsequent states (COUNTDOWN, FIGHT, etc.) */
-          <div className="flex flex-col items-center justify-center text-center space-y-6 max-w-2xl px-4 py-8">
-            <div className="px-4 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-xs font-mono uppercase tracking-[0.2em] text-neutral-400">
-              Current Stage
-            </div>
+      {currentState === ExhibitionState.PROCESSING && (
+        <ProcessingScreen
+          result={analysisResult}
+          error={analysisError}
+          onComplete={() => goToState(ExhibitionState.REVIEW)}
+          onReset={resetToWelcome}
+        />
+      )}
 
-            <h2 className="text-4xl sm:text-5xl md:text-6xl font-black uppercase tracking-tight text-white">
-              {currentState}
-            </h2>
+      {currentState === ExhibitionState.REVIEW && (
+        <ReviewScreen
+          result={analysisResult}
+          onNext={() => goToState(ExhibitionState.FIGHTER_REVEAL)}
+          onReset={resetToWelcome}
+        />
+      )}
 
-            <p className="text-neutral-400 text-sm sm:text-base font-mono">
-              Screen implementation pending next phase.
-            </p>
+      {currentState === ExhibitionState.FIGHTER_REVEAL && (
+        <FighterRevealScreen
+          result={analysisResult}
+          onReset={resetToWelcome}
+        />
+      )}
 
-            <div className="pt-4 flex flex-wrap items-center justify-center gap-3">
-              <button
-                type="button"
-                onClick={resetToWelcome}
-                className="px-6 py-2.5 rounded-lg text-xs font-mono font-semibold tracking-wider bg-red-950/60 hover:bg-red-950/90 border border-red-700/60 text-red-300 transition-colors cursor-pointer"
-              >
-                Reset to WELCOME ↺
-              </button>
-            </div>
-
-            {/* Minimal Dev Stepper (To preview all states) */}
-            <div className="pt-6 border-t border-neutral-900 w-full flex flex-wrap items-center justify-center gap-1.5">
-              {EXHIBITION_FLOW_SEQUENCE.map((state) => (
-                <button
-                  key={state}
-                  type="button"
-                  onClick={() => goToState(state)}
-                  className={`px-2.5 py-1 rounded text-[10px] font-mono tracking-wider cursor-pointer transition-all ${
-                    currentState === state
-                      ? 'bg-red-600 text-white font-bold'
-                      : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
-                  }`}
-                >
-                  {state}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+      {/* Dev Navigation Footer Stepper */}
+      <div className="fixed bottom-12 inset-x-0 z-30 pointer-events-none flex justify-center opacity-20 hover:opacity-100 transition-opacity">
+        <div className="pointer-events-auto flex flex-wrap items-center justify-center gap-1.5 px-3 py-1.5 rounded-full bg-neutral-950/90 border border-neutral-800">
+          {EXHIBITION_FLOW_SEQUENCE.map((state) => (
+            <button
+              key={state}
+              type="button"
+              onClick={() => goToState(state)}
+              className={`px-2 py-0.5 rounded text-[9px] font-mono tracking-wider cursor-pointer transition-all ${
+                currentState === state
+                  ? 'bg-red-600 text-white font-bold'
+                  : 'bg-neutral-900 text-neutral-400 hover:text-white border border-neutral-800'
+              }`}
+            >
+              {state}
+            </button>
+          ))}
+        </div>
+      </div>
     </ExhibitionShell>
   );
 }

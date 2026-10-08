@@ -1,62 +1,53 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { CinematicArenaBackground } from '../components/CinematicArenaBackground';
+import { ArenaHeader } from '../components/ArenaHUD';
+import { FireEmberSparks } from '../components/FighterSilhouettes';
 
-/**
- * Countdown sequence labels.
- * 'FIGHT!' is the final frame shown briefly before onComplete fires.
- */
 type CountdownLabel = '3' | '2' | '1' | 'FIGHT!';
 
 const SEQUENCE: CountdownLabel[] = ['3', '2', '1', 'FIGHT!'];
-
-/** How long each numeric digit is shown (ms). */
 const DIGIT_DURATION_MS = 1000;
-
-/** How long "FIGHT!" stays on screen before onComplete fires (ms). */
 const FIGHT_DURATION_MS = 800;
 
 interface CountdownScreenProps {
-  /**
-   * Called once the full 3-2-1-FIGHT! sequence completes.
-   * Intentionally kept argument-free so camera / recording sync
-   * can be wired in here later without changing the signature contract.
-   */
   onComplete: () => void;
 }
 
 /**
  * CountdownScreen – Phase 6
  *
- * Displays a cinematic 3 -> 2 -> 1 -> FIGHT! countdown sequence.
- * Each digit shows for ~1 s; "FIGHT!" shows briefly, then onComplete fires.
- * All timers are cleaned up on unmount.
+ * FIERY / RED ENERGY theme matching reference:
+ * - Fiery smoke, burning red ember sparks, red glowing cage, intense spotlights
+ * - Giant textured crimson number (3 -> 2 -> 1 -> FIGHT!)
+ * - Light pulses & camera shake
  */
 export const CountdownScreen: React.FC<CountdownScreenProps> = ({
   onComplete,
 }) => {
   const [stepIndex, setStepIndex] = useState<number>(0);
   const [visible, setVisible] = useState<boolean>(true);
+  const [flash, setFlash] = useState<boolean>(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];
-
     let elapsed = 0;
 
     SEQUENCE.forEach((_, index) => {
       const isFight = index === SEQUENCE.length - 1;
       const showDuration = isFight ? FIGHT_DURATION_MS : DIGIT_DURATION_MS;
-      const fadeOutOffset = showDuration - 150; // start fade before next tick
+      const fadeOutOffset = showDuration - 150;
 
-      // Advance to this step
       timers.push(
         setTimeout(() => {
           setStepIndex(index);
           setVisible(true);
+          setFlash(true);
+          setTimeout(() => setFlash(false), 200);
         }, elapsed)
       );
 
-      // Fade out just before the next step (skip on FIGHT! since we complete immediately)
       if (!isFight) {
         timers.push(
           setTimeout(() => {
@@ -68,7 +59,6 @@ export const CountdownScreen: React.FC<CountdownScreenProps> = ({
       elapsed += showDuration;
     });
 
-    // Fire onComplete after the full sequence
     timers.push(
       setTimeout(() => {
         onCompleteRef.current();
@@ -78,53 +68,82 @@ export const CountdownScreen: React.FC<CountdownScreenProps> = ({
     return () => {
       timers.forEach(clearTimeout);
     };
-  }, []); // intentionally run once on mount
+  }, []);
 
   const label = SEQUENCE[stepIndex];
   const isFight = label === 'FIGHT!';
 
   return (
-    <div className="w-full flex-1 flex flex-col items-center justify-center text-center px-4 py-8 select-none">
-      <div className="max-w-5xl mx-auto flex flex-col items-center space-y-10 sm:space-y-12">
-        {/* Stage Status Badge */}
-        <div className="inline-flex items-center gap-3 px-5 py-2 rounded-full bg-neutral-900/90 border border-neutral-800 text-xs sm:text-sm font-mono uppercase tracking-[0.3em] text-neutral-400">
-          <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-pulse" />
-          <span>Stage 04 // Countdown</span>
-        </div>
+    <CinematicArenaBackground variant="countdown" pulseRed={flash}>
+      <ArenaHeader stageNumber="04" stageTitle="FIGHT SYSTEM ARMED" />
 
-        {/* Main Countdown Display */}
-        <div
-          style={{
-            opacity: visible ? 1 : 0,
-            transform: visible ? 'scale(1)' : 'scale(0.85)',
-            transition: 'opacity 150ms ease-in-out, transform 150ms ease-in-out',
-          }}
-        >
-          {isFight ? (
-            <h1
-              className="font-black uppercase tracking-tight leading-none drop-shadow-[0_10px_50px_rgba(220,38,38,0.85)]"
-              style={{ fontSize: 'clamp(4rem, 18vw, 12rem)' }}
-            >
-              <span className="text-red-600">FIGHT</span>
-              <span className="text-white">!</span>
-            </h1>
-          ) : (
-            <h1
-              className="font-black leading-none text-white drop-shadow-[0_10px_50px_rgba(0,0,0,0.9)]"
-              style={{ fontSize: 'clamp(8rem, 30vw, 22rem)' }}
+      {/* Fiery Ember Sparks & Energy Layer */}
+      <FireEmberSparks />
+
+      {/* Arena flash overlay on number tick */}
+      <div
+        className={`pointer-events-none absolute inset-0 z-20 bg-red-600/40 transition-opacity duration-200 ${
+          flash ? 'opacity-100' : 'opacity-0'
+        }`}
+      />
+
+      <div className="w-full flex-1 flex flex-col items-center justify-center text-center px-4 py-8 select-none relative z-20">
+        <div className="max-w-5xl mx-auto flex flex-col items-center space-y-6 sm:space-y-8">
+
+          {/* Background Cinematic Arena Walk-In */}
+          <div className="absolute inset-0 z-0 pointer-events-none overflow-hidden">
+            <img 
+              src="/assets/countdown-bg.jpg" 
+              alt="Fighter entering arena" 
+              className="w-full h-full object-cover object-top opacity-35"
+            />
+            {/* Bottom fade to keep countdown legible */}
+            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-black/30" />
+          </div>
+
+          {/* Subtitle Header */}
+          <div className="space-y-1 relative z-10">
+            <h2 className="text-4xl sm:text-6xl font-black uppercase tracking-tight leading-none">
+              {isFight ? (
+                <><span className="text-white drop-shadow-[0_10px_35px_rgba(255,255,255,0.2)]">ENGAGING</span> <span className="text-[#E10600] drop-shadow-[0_0_35px_rgba(225,6,0,0.8)]">CV TARGETING</span></>
+              ) : (
+                <><span className="text-white drop-shadow-[0_10px_35px_rgba(255,255,255,0.2)]">GET</span> <span className="text-[#E10600] drop-shadow-[0_0_35px_rgba(225,6,0,0.8)]">READY</span></>
+              )}
+            </h2>
+            <p className="text-xs sm:text-base font-mono uppercase tracking-[0.3em] text-[#E10600] font-bold">
+              {isFight ? 'ROUND IN PROGRESS' : 'FIGHT STARTS IN'}
+            </p>
+          </div>
+
+          {/* Giant Numeric Countdown Display */}
+          <div
+            style={{
+              opacity: visible ? 1 : 0,
+              transform: visible ? 'scale(1)' : 'scale(0.80)',
+              transition: 'opacity 150ms ease-in-out, transform 150ms ease-in-out',
+            }}
+            className="flex items-center justify-center my-2 relative z-10"
+          >
+            <span
+              className={`font-black font-mono leading-none tracking-tighter tabular-nums select-none ${
+                isFight
+                  ? 'text-7xl sm:text-9xl md:text-[14rem] text-red-500 drop-shadow-[0_0_120px_rgba(220,38,38,1)] animate-pulse'
+                  : 'text-9xl sm:text-[14rem] md:text-[18rem] text-white drop-shadow-[0_0_90px_rgba(220,38,38,0.85)]'
+              }`}
             >
               {label}
-            </h1>
-          )}
-        </div>
+            </span>
+          </div>
 
-        {/* Pacing Indicator */}
-        <div className="pt-2">
-          <span className="text-xs font-mono tracking-widest text-neutral-500 uppercase">
-            {isFight ? 'Starting fight\u2026' : 'Get into position'}
-          </span>
+          {/* Subline */}
+          <div className="pt-2 relative z-10">
+            <p className="text-xs font-mono uppercase tracking-[0.3em] text-neutral-300 font-bold">
+              {isFight ? 'KEEP ARMS ELEVATED IN FIGHTING STANCE' : 'PREPARE COMBAT STANCE IN THE OCTAGON'}
+            </p>
+          </div>
+
         </div>
       </div>
-    </div>
+    </CinematicArenaBackground>
   );
 };

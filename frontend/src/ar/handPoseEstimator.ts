@@ -42,8 +42,15 @@ export interface Vec3 {
   z: number;
 }
 
+export interface Quat {
+  x: number;
+  y: number;
+  z: number;
+  w: number;
+}
+
 /**
- * Full 3D-ish hand pose for one glove.
+ * Full 3D hand pose for one glove.
  */
 export interface HandPose {
   /**
@@ -53,15 +60,9 @@ export interface HandPose {
   anchorNorm: { x: number; y: number };
 
   /**
-   * Euler angles in RADIANS for Three.js (XYZ order).
-   *
-   * rotX: pitch – hand tip toward / away from camera.
-   * rotY: yaw   – hand rotates left / right around vertical axis.
-   * rotZ: roll  – hand rolls clockwise / counter-clockwise in the image plane.
+   * 3D orientation quaternion representing the hand basis in Three.js coordinates.
    */
-  rotX: number;
-  rotY: number;
-  rotZ: number;
+  quat: Quat;
 
   /**
    * Approximate hand span in normalised units (not pixels).
@@ -69,8 +70,21 @@ export interface HandPose {
    */
   handSpanNorm: number;
 
+  /**
+   * Palm width: distance from index MCP (lm 5) to pinky MCP (lm 17)
+   * in normalised [0..1] screen space. Primary signal for wearable glove sizing.
+   * Typical range: 0.05 (far) – 0.20 (close).
+   */
+  palmWidthNorm: number;
+
   /** MediaPipe handedness label ('Left' or 'Right') on the participant's actual hand. */
   side: 'left' | 'right';
+
+  /** Normalized longitudinal vector: wrist -> middle MCP. */
+  longVector: Vec3;
+
+  /** Normalized palm normal vector. */
+  palmNormal: Vec3;
 }
 
 export interface TrackedPoses {
@@ -81,10 +95,6 @@ export interface TrackedPoses {
 // ────────────────────────────────────────────────────────────────────────────
 // Vector math helpers (pure functions, no Three.js dependency)
 // ────────────────────────────────────────────────────────────────────────────
-
-function sub3(a: Vec3, b: Vec3): Vec3 {
-  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
-}
 
 function cross3(a: Vec3, b: Vec3): Vec3 {
   return {
@@ -98,6 +108,55 @@ function normalize3(v: Vec3): Vec3 {
   const len = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
   if (len < 1e-9) return { x: 0, y: 0, z: 1 };
   return { x: v.x / len, y: v.y / len, z: v.z / len };
+}
+
+/**
+ * Converts a 3x3 orthonormal rotation matrix to a unit quaternion {x, y, z, w}.
+ * Matrix elements are given row-by-row:
+ *   [ m00 m01 m02 ]
+ *   [ m10 m11 m12 ]
+ *   [ m20 m21 m22 ]
+ */
+function basisToQuaternion(
+  m00: number, m01: number, m02: number,
+  m10: number, m11: number, m12: number,
+  m20: number, m21: number, m22: number
+): Quat {
+  const tr = m00 + m11 + m22;
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  let w = 1;
+
+  if (tr > 0) {
+    const s = 0.5 / Math.sqrt(tr + 1.0);
+    w = 0.25 / s;
+    x = (m21 - m12) * s;
+    y = (m02 - m20) * s;
+    z = (m10 - m01) * s;
+  } else if (m00 > m11 && m00 > m22) {
+    const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
+    w = (m21 - m12) / s;
+    x = 0.25 * s;
+    y = (m01 + m10) / s;
+    z = (m02 + m20) / s;
+  } else if (m11 > m22) {
+    const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
+    w = (m02 - m20) / s;
+    x = (m01 + m10) / s;
+    y = 0.25 * s;
+    z = (m12 + m21) / s;
+  } else {
+    const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
+    w = (m10 - m01) / s;
+    x = (m02 + m20) / s;
+    y = (m12 + m21) / s;
+    z = 0.25 * s;
+  }
+
+  const len = Math.hypot(x, y, z, w);
+  if (len < 1e-9) return { x: 0, y: 0, z: 0, w: 1 };
+  return { x: x / len, y: y / len, z: z / len, w: w / len };
 }
 
 /** Convert a NormalizedLandmark to Vec3 */
@@ -125,64 +184,23 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
 
   for (let i = 0; i < results.landmarks.length; i++) {
     const lms = results.landmarks[i];
-    if (!lms || lms.length < 18) continue;
+    if (!lms || lms.length < 21) continue;
 
     // Key landmarks
     const wrist = lm(lms[0]);
-    const thumb1 = lm(lms[1]);
-    const thumb4 = lm(lms[4]);
     const indexMcp = lm(lms[5]);
-    const indexTip = lm(lms[8]);
     const middleMcp = lm(lms[9]);
     const ringMcp = lm(lms[13]);
     const pinkyMcp = lm(lms[17]);
     const pinkyTip = lm(lms[20]);
+    void pinkyTip;
 
-    // ── Build hand local frame ──────────────────────────────────────────────
-
-    // Axis 1 (finger direction): wrist → knuckle centroid
+    // ── Build knuckle centroid & anchor ─────────────────────────────────────
     const knuckleCentroid: Vec3 = {
       x: (indexMcp.x + middleMcp.x * 2 + ringMcp.x + pinkyMcp.x) / 5,
       y: (indexMcp.y + middleMcp.y * 2 + ringMcp.y + pinkyMcp.y) / 5,
       z: (indexMcp.z + middleMcp.z * 2 + ringMcp.z + pinkyMcp.z) / 5,
     };
-    const fingerAxis = normalize3(sub3(knuckleCentroid, wrist));
-
-    // Axis 2 (transverse/knuckle row): index-MCP → pinky-MCP
-    const transverseAxis = normalize3(sub3(pinkyMcp, indexMcp));
-
-    // Axis 3 (palm normal): fingerAxis × transverseAxis
-    let palmNormal = normalize3(cross3(fingerAxis, transverseAxis));
-
-    // ── Compute Euler angles from the hand frame ────────────────────────────
-
-    // ROLL (rotation around the finger axis – in-plane hand roll):
-    // We project the transverse axis onto the XY plane to get the in-plane rotation.
-    // MediaPipe x is mirrored, so negate x for display frame.
-    const transDisplayX = -transverseAxis.x;
-    const transDisplayY = -transverseAxis.y; // Y increases downward in image
-    // Angle of knuckle row relative to horizontal
-    const roll = Math.atan2(transDisplayY, transDisplayX); // radians
-
-    // YAW (rotation around vertical screen axis):
-    // Use the palm normal's x component. When hand faces camera, palmNormal.z ≈ 1.
-    // When hand turns right (in mirror = participant turns their right fist away),
-    // palmNormal.x changes.
-    // Clamp to ±60° for stability.
-    const yaw = Math.asin(Math.min(1, Math.max(-1, palmNormal.x)));
-
-    // PITCH (hand tilting toward/away from camera):
-    // Estimate using ratio of apparent hand height vs width.
-    // When hand is horizontal (pitched forward), the wrist→knuckle vector
-    // appears foreshortened. We can use the 3D z-depth difference.
-    //
-    // fingerAxis.z gives the z-slope of the hand. Negative = tips toward camera.
-    // MediaPipe z is in palm-width units (roughly), negative = toward camera.
-    const pitchRaw = Math.asin(Math.min(1, Math.max(-1, -fingerAxis.z * 3)));
-    // Scale down pitch aggressively since monocular z is noisy
-    const pitch = pitchRaw * 0.45;
-
-    // ── Anchor position (in mirrored display space) ─────────────────────────
 
     // We want the glove cuff to be at the wrist and knuckles to cover the fist.
     const anchorNorm = {
@@ -192,7 +210,6 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
     };
 
     // ── Hand span (normalised) ──────────────────────────────────────────────
-
     const wristToKnuckleDist = Math.hypot(
       knuckleCentroid.x - wrist.x,
       knuckleCentroid.y - wrist.y,
@@ -204,27 +221,72 @@ export function extractHandPoses(results: HandLandmarkerResult): TrackedPoses {
     const handSpanNorm = Math.max(wristToKnuckleDist, knuckleWidth * 1.2);
 
     // ── Handedness ──────────────────────────────────────────────────────────
-
     // MediaPipe handedness is in the un-mirrored (camera) frame.
-    // Because we CSS-mirror the display, Left and Right are swapped visually.
-    // A person's LEFT hand appears on the RIGHT side of the mirrored preview.
-    // MediaPipe calls it 'Left' (camera-left = participant left hand).
-    // After mirroring, it's on the display-right. We keep the participant frame:
+    // In mirrored display: MediaPipe "Right" = participant's LEFT hand
     const handednessRaw = results.handedness?.[i]?.[0]?.categoryName ?? 'Right';
-    // In a mirrored camera: MediaPipe "Right" = participant's LEFT hand
     const side: 'left' | 'right' = handednessRaw === 'Right' ? 'left' : 'right';
 
-    // Suppress linter warnings for landmarks extracted but only used for
-    // the coordinate frame computation above (not all are directly referenced below)
-    void thumb1; void thumb4; void indexTip; void pinkyTip; void palmNormal;
+    // ── Build stable 3D orthonormal hand basis ─────────────────────────────
+    // Convert landmark displacements to mirrored display frame:
+    // Raw camera: x right, y down, z depth into scene (smaller = closer).
+    // Mirrored display: x left-to-right (flipped), y up (+Y), z towards camera (+Z).
+    // Scale monocular z by 2.5 to match visual scale with x/y.
+    const depthScale = 2.5;
+    const longVec: Vec3 = {
+      x: -(middleMcp.x - wrist.x),
+      y: -(middleMcp.y - wrist.y),
+      z: -(middleMcp.z - wrist.z) * depthScale,
+    };
+    const longAxis = normalize3(longVec);
+
+    // Transverse vector across knuckles:
+    // For right hand: index MCP -> pinky MCP
+    // For left hand: pinky MCP -> index MCP (matching mirrored GLB scale.x = -1)
+    const transVec: Vec3 = side === 'right' ? {
+      x: -(pinkyMcp.x - indexMcp.x),
+      y: -(pinkyMcp.y - indexMcp.y),
+      z: -(pinkyMcp.z - indexMcp.z) * depthScale,
+    } : {
+      x: -(indexMcp.x - pinkyMcp.x),
+      y: -(indexMcp.y - pinkyMcp.y),
+      z: -(indexMcp.z - pinkyMcp.z) * depthScale,
+    };
+    const transAxis = normalize3(transVec);
+
+    // Palm normal: points toward camera (+Z)
+    let palmNorm = cross3(transAxis, longAxis);
+    const palmLen = Math.hypot(palmNorm.x, palmNorm.y, palmNorm.z);
+    if (palmLen < 1e-9) {
+      palmNorm = { x: 0, y: 0, z: 1 };
+    } else {
+      palmNorm = { x: palmNorm.x / palmLen, y: palmNorm.y / palmLen, z: palmNorm.z / palmLen };
+    }
+
+    // Right-handed orthonormal basis [bX, bY, bZ]:
+    // bY = longAxis (forearm / fingers pointing up)
+    // bZ = palmNorm (knuckles / palm facing forward toward camera)
+    // bX = cross(bY, bZ) (transverse knuckle direction)
+    const bY: Vec3 = longAxis;
+    let bZ: Vec3 = palmNorm;
+    let bX: Vec3 = normalize3(cross3(bY, bZ));
+    bZ = normalize3(cross3(bX, bY));
+
+    // Convert orthonormal 3x3 basis matrix to unit quaternion:
+    // Matrix columns are bX, bY, bZ.
+    const quat = basisToQuaternion(
+      bX.x, bY.x, bZ.x,
+      bX.y, bY.y, bZ.y,
+      bX.z, bY.z, bZ.z,
+    );
 
     poses.push({
       anchorNorm,
-      rotX: pitch,
-      rotY: -yaw, // negate for mirrored display
-      rotZ: -roll, // negate: Three.js Z-rot is counter-clockwise
+      quat,
       handSpanNorm,
+      palmWidthNorm: knuckleWidth,
       side,
+      longVector: longAxis,
+      palmNormal: palmNorm,
     });
   }
 

@@ -20,17 +20,22 @@ export const ExhibitionShell: React.FC<ExhibitionShellProps> = ({
   children,
   currentState,
 }) => {
+  // Determine if we need the specific Fighter Reveal background or the shared global one
+  const isReveal = currentState === 'FIGHTER_REVEAL';
+  const bgImage = isReveal ? '/assets/fighter-reveal-bg.jpg' : '/assets/global-arena-bg.jpg';
+
   return (
     <div className="fixed inset-0 w-screen h-screen overflow-hidden select-none bg-black text-neutral-100 flex flex-col justify-between font-sans antialiased">
-      {/* Cinematic ambient background glow and vignette */}
-      <div 
-        className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(circle_at_50%_40%,rgba(180,20,20,0.12),transparent_70%)]" 
-        aria-hidden="true" 
-      />
-      <div 
-        className="pointer-events-none absolute inset-0 z-0 bg-[radial-gradient(ellipse_at_bottom,rgba(255,255,255,0.03),transparent_60%)]" 
-        aria-hidden="true" 
-      />
+      {/* ── GLOBAL FULL-VIEWPORT BACKGROUND LAYER ── */}
+      <div className="pointer-events-none absolute inset-0 z-0 overflow-hidden" aria-hidden="true">
+        <img
+          src={bgImage}
+          alt="Exhibition Background"
+          className="absolute inset-0 w-full h-full object-cover opacity-60"
+        />
+        {/* Cinematic dark overlay/vignette for readability across the entire screen */}
+        <div className="absolute inset-0 bg-gradient-to-b from-black/80 via-black/40 to-black/80" />
+      </div>
 
       {/* Subtle corner arena markers */}
       <div className="pointer-events-none absolute top-6 left-6 w-8 h-8 border-t-2 border-l-2 border-neutral-700/60 z-10" aria-hidden="true" />
