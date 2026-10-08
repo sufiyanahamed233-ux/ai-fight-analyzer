@@ -65,6 +65,12 @@ COCO_SKELETON_PAIRS: list[tuple[str, str]] = [
 ]
 
 
+# Constants for liveness & stall detection
+STALE_FRAME_TIMEOUT_SEC: float = 2.0
+MAX_CONSECUTIVE_FAILS: int = 25
+STARTUP_GRACE_PERIOD_SEC: float = 3.0
+
+
 def draw_pose_skeleton(frame: np.ndarray, pose: Any) -> None:
     """Draw subtle 17 COCO keypoints and connecting skeleton lines onto frame in-place."""
     if pose is None:
@@ -104,6 +110,7 @@ class SharedFrontCaptureManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._reconnect_lock = threading.Lock()
         self._cap: Optional[cv2.VideoCapture] = None
         self._thread: Optional[threading.Thread] = None
         self._pose_thread: Optional[threading.Thread] = None
@@ -123,6 +130,11 @@ class SharedFrontCaptureManager:
         self._latest_frame: Optional[np.ndarray] = None
         self._frame_seq: int = 0
 
+        # Liveness & health tracking
+        self._start_time: float = 0.0
+        self._last_frame_time: float = 0.0
+        self._consecutive_fails: int = 0
+
         # Live pose tracking state
         self._pose_lock = threading.Lock()
         self._current_pose: Optional[Any] = None
@@ -137,8 +149,24 @@ class SharedFrontCaptureManager:
 
     @property
     def is_running(self) -> bool:
+        """Reflect whether the shared capture is active AND actually receiving frames."""
         with self._lock:
-            return self._cap is not None and self._cap.isOpened() and not self._stop_event.is_set()
+            if self._cap is None or not self._cap.isOpened() or self._stop_event.is_set():
+                return False
+            if self._thread is None or not self._thread.is_alive():
+                return False
+            now = time.monotonic()
+            if self._last_frame_time > 0:
+                if (
+                    now - self._last_frame_time > STALE_FRAME_TIMEOUT_SEC
+                    or self._consecutive_fails >= MAX_CONSECUTIVE_FAILS
+                ):
+                    return False
+                return True
+            # Grace period awaiting first frame after startup
+            if now - self._start_time > STARTUP_GRACE_PERIOD_SEC:
+                return False
+            return True
 
     @property
     def source(self) -> Union[int, str]:
@@ -153,12 +181,26 @@ class SharedFrontCaptureManager:
         height: int = TARGET_HEIGHT,
         fps: float = TARGET_FPS,
     ) -> bool:
-        """Start the shared capture if not already running."""
+        """Start the shared capture if not already running and healthy."""
         with self._lock:
             if self._cap is not None and self._cap.isOpened() and not self._stop_event.is_set():
-                logger.debug("SharedFrontCapture already active on %s", self._source)
-                return True
+                now = time.monotonic()
+                is_stale = (
+                    self._last_frame_time > 0
+                    and (
+                        now - self._last_frame_time > STALE_FRAME_TIMEOUT_SEC
+                        or self._consecutive_fails >= MAX_CONSECUTIVE_FAILS
+                    )
+                )
+                if not is_stale and self._thread is not None and self._thread.is_alive():
+                    logger.debug("SharedFrontCapture already active on %s", self._source)
+                    return True
+                logger.warning("SharedFrontCapture is stale or inactive on %s. Restarting...", self._source)
 
+        # Stop previous stale capture cleanly before starting fresh
+        self.stop()
+
+        with self._lock:
             self._source = source
             self._rotation = rotation
             self._width = width
@@ -168,6 +210,9 @@ class SharedFrontCaptureManager:
             self._latest_jpeg = None
             self._latest_frame = None
             self._frame_seq = 0
+            self._start_time = time.monotonic()
+            self._last_frame_time = 0.0
+            self._consecutive_fails = 0
 
             logger.info("Opening shared front camera capture on %s...", source)
             cap = _open_capture(source)
@@ -205,17 +250,108 @@ class SharedFrontCaptureManager:
             logger.info("Shared front camera reader and pose threads started on %s.", source)
             return True
 
+    def _reconnect(self) -> bool:
+        """Release the stale capture and reconnect the same shared capture handle."""
+        if not self._reconnect_lock.acquire(blocking=False):
+            return False
+        try:
+            with self._lock:
+                if self._stop_event.is_set():
+                    return False
+                old_cap = self._cap
+                self._cap = None
+                source = self._source
+                width = self._width
+                height = self._height
+                fps = self._fps
+
+            if old_cap is not None:
+                try:
+                    old_cap.release()
+                except Exception as exc:
+                    logger.debug("Error releasing capture during reconnect: %s", exc)
+
+            time.sleep(0.15)  # Brief pause for socket cleanup
+
+            with self._lock:
+                if self._stop_event.is_set():
+                    return False
+
+            logger.info("Attempting reconnect for shared front camera on %s...", source)
+            new_cap = _open_capture(source)
+            if not new_cap.isOpened():
+                logger.warning("Failed to reconnect shared front camera on %s", source)
+                try:
+                    new_cap.release()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._cap = None
+                time.sleep(0.2)
+                return False
+
+            new_cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            new_cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            new_cap.set(cv2.CAP_PROP_FPS, fps)
+
+            raw_w = int(new_cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or width
+            raw_h = int(new_cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or height
+            meas_fps = new_cap.get(cv2.CAP_PROP_FPS)
+
+            with self._lock:
+                self._cap = new_cap
+                self._raw_width = raw_w
+                self._raw_height = raw_h
+                self._actual_fps = meas_fps if (meas_fps and meas_fps > 0) else fps
+                self._consecutive_fails = 0
+                self._start_time = time.monotonic()
+
+            logger.info("Shared front camera reconnected successfully on %s.", source)
+            return True
+        finally:
+            self._reconnect_lock.release()
+
     def _reader_loop(self) -> None:
         """Continuously read frames from the single capture."""
         while not self._stop_event.is_set():
-            cap = self._cap
-            if cap is None:
-                break
+            with self._lock:
+                cap = self._cap
 
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                time.sleep(0.01)
+            if cap is None:
+                if not self._stop_event.is_set():
+                    self._reconnect()
+                time.sleep(0.02)
                 continue
+
+            try:
+                ret, frame = cap.read()
+            except Exception as exc:
+                logger.debug("Exception reading frame from shared front camera: %s", exc)
+                ret, frame = False, None
+
+            if not ret or frame is None:
+                with self._lock:
+                    self._consecutive_fails += 1
+                    fails = self._consecutive_fails
+                    last_time = self._last_frame_time or self._start_time
+                    time_since_frame = time.monotonic() - last_time
+
+                if fails >= MAX_CONSECUTIVE_FAILS or time_since_frame > STALE_FRAME_TIMEOUT_SEC:
+                    logger.warning(
+                        "Shared front camera stalled (%d consecutive read fails, %.2fs since last frame). Reconnecting...",
+                        fails,
+                        time_since_frame,
+                    )
+                    self._reconnect()
+                else:
+                    time.sleep(0.01)
+                continue
+
+            # Valid frame received
+            now = time.monotonic()
+            with self._lock:
+                self._consecutive_fails = 0
+                self._last_frame_time = now
 
             processed_frame = rotate_frame(frame, self._rotation)
 
@@ -356,6 +492,11 @@ class SharedFrontCaptureManager:
         result.actual_height = writer_h
         result.actual_fps = actual_fps
 
+        # If capture is stalled or inactive at record start, reconnect immediately
+        if not self.is_running:
+            logger.info("Shared front camera inactive or stalled at record start. Reconnecting...")
+            self._reconnect()
+
         session_dir.mkdir(parents=True, exist_ok=True)
         video_path = session_dir / f"{config.role.value}_{ts_prefix}.avi"
         writer = cv2.VideoWriter(str(video_path), _FOURCC, config.fps, (writer_w, writer_h))
@@ -416,6 +557,9 @@ class SharedFrontCaptureManager:
             self._cap = None
             self._latest_jpeg = None
             self._latest_frame = None
+            self._start_time = 0.0
+            self._last_frame_time = 0.0
+            self._consecutive_fails = 0
             with self._pose_lock:
                 self._current_pose = None
                 self._pose_time = 0.0

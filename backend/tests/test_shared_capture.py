@@ -240,3 +240,43 @@ class TestSharedFrontCaptureManager:
 
         # None pose should be safe no-op
         draw_pose_skeleton(frame, None)
+
+    def test_is_running_reflects_frame_freshness(self):
+        manager = SharedFrontCaptureManager()
+        cap_mock = _make_cap_mock(opened=True)
+
+        with patch("app.camera.shared_capture._open_capture", return_value=cap_mock):
+            manager.start("http://127.0.0.1:4747/video")
+            assert manager.is_running is True
+
+            # Simulate frames stopped arriving (stale timeout)
+            with manager._lock:
+                manager._last_frame_time = time.monotonic() - 5.0
+
+            assert manager.is_running is False
+
+            manager.stop()
+
+    def test_reader_loop_auto_reconnects_on_stalled_stream(self):
+        manager = SharedFrontCaptureManager()
+        cap_mock_1 = _make_cap_mock(opened=True)
+        # First capture fails reading frames
+        cap_mock_1.read.return_value = (False, None)
+
+        cap_mock_2 = _make_cap_mock(opened=True)
+        cap_mock_2.read.return_value = (True, _make_dummy_frame())
+
+        with patch("app.camera.shared_capture._open_capture", side_effect=[cap_mock_1, cap_mock_2]) as mock_open:
+            manager.start("http://127.0.0.1:4747/video")
+
+            # Wait for reader thread to detect stall and reconnect (up to 1.5s)
+            t_wait_start = time.monotonic()
+            while mock_open.call_count < 2 and time.monotonic() - t_wait_start < 1.5:
+                time.sleep(0.05)
+
+            # _open_capture should have been called a second time for reconnect
+            assert mock_open.call_count >= 2
+            cap_mock_1.release.assert_called()
+
+            manager.stop()
+

@@ -15,6 +15,8 @@ Verifies the 6 categories (stance, balance, guard, striking, coordination, movem
 from __future__ import annotations
 
 import json
+from typing import Optional
+
 import pytest
 
 from app.analysis.fight_observer import DISCLAIMER_TEXT, FightObservationAnalyzer
