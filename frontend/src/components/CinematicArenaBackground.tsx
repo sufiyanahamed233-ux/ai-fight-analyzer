@@ -25,8 +25,8 @@ export interface CinematicArenaBackgroundProps {
  */
 export const CinematicArenaBackground: React.FC<CinematicArenaBackgroundProps> = ({
   variant = 'welcome',
-  videoSrc,
-  bgImageSrc,
+  videoSrc: _videoSrc,
+  bgImageSrc: _bgImageSrc,
   showArenaFloor = true,
   showCageMesh = true,
   pulseRed = false,

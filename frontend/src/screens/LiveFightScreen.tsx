@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useARGloveOverlay } from '../ar/useARGloveOverlay';
 import { apiService } from '../services/api';
+import { FRONT_STREAM_URL, checkPhone1StreamAvailable } from '../services/camera';
 import type { FightObservationResult } from '../types/analysis';
 import { CornerBrackets } from '../components/TelemetryOverlay';
 
@@ -32,7 +33,7 @@ interface LiveFightScreenProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_DURATION_SECS = 10;
+const DEFAULT_DURATION_SECS = 7;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,25 +114,56 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
     async function startCamera() {
       try {
-        // 1. Check if backend stream is available
-        const { FRONT_STREAM_URL, checkPhone1StreamAvailable } = await import('../services/camera');
-        const isAvailable = await checkPhone1StreamAvailable();
+        // 1. Resilient readiness check (retry up to 4 times with backoff)
+        let isAvailable = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (cancelled) return;
+          isAvailable = await checkPhone1StreamAvailable();
+          if (isAvailable) break;
+          await new Promise((r) => setTimeout(r, 600));
+        }
 
         if (cancelled) return;
-
-        if (!isAvailable) {
-          setCameraState('unavailable');
-          return;
-        }
 
         // 2. Consume MJPEG stream into a hidden Image
         const img = new Image();
         img.crossOrigin = 'anonymous';
-        
+
         await new Promise<void>((resolve, reject) => {
-          img.onload = () => resolve();
-          img.onerror = () => reject(new Error('Failed to load backend MJPEG stream'));
-          // Append a timestamp to avoid aggressive caching
+          let settled = false;
+
+          const timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              if (img.naturalWidth > 0 || isAvailable) {
+                resolve();
+              } else {
+                reject(new Error('Timed out waiting for MJPEG stream frame'));
+              }
+            }
+          }, 3500);
+
+          img.onload = () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            }
+          };
+
+          img.onerror = () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              if (isAvailable) {
+                // If backend status was verified active, resolve and let canvas draw when frames arrive
+                resolve();
+              } else {
+                reject(new Error('Failed to load backend MJPEG stream'));
+              }
+            }
+          };
+
           img.src = `${FRONT_STREAM_URL}?t=${Date.now()}`;
         });
 
@@ -150,7 +182,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
         const renderLoop = () => {
           if (cancelled) return;
-          if (img.complete && img.naturalWidth > 0) {
+          if (img.naturalWidth > 0) {
             ctx.drawImage(img, 0, 0, hiddenCanvas.width, hiddenCanvas.height);
           }
           animId = requestAnimationFrame(renderLoop);
@@ -170,6 +202,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         setCameraState('ready');
       } catch (err: unknown) {
         if (cancelled) return;
+        console.error('[LiveFightScreen] Camera acquisition error:', err);
         setCameraState('unavailable');
       }
     }
@@ -215,13 +248,26 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   }, [cameraState, durationSecs]);
 
   // -------------------------------------------------------------------------
+  // Render helpers & Timeline Logic
+  // -------------------------------------------------------------------------
+
+  const elapsedSecs = durationSecs - timeLeft;
+  const isPrepPhase = elapsedSecs < 2;
+  const timerDone = isFightEnded || timeLeft <= 0;
+  
+  // Progress bar represents the continuous 15s duration (0s to 15s)
+  const fightProgressPct = cameraState === 'ready'
+    ? ((durationSecs - timeLeft) / durationSecs) * 100
+    : 0;
+
+  // -------------------------------------------------------------------------
   // AR Glove canvas overlay (Three.js WebGL with 2D PNG fallback)
   // -------------------------------------------------------------------------
   useARGloveOverlay(
     canvasRef,
     viewportRef,
     videoRef,
-    cameraState === 'ready' && !isFightEnded,
+    false,
   );
 
   // -------------------------------------------------------------------------
@@ -287,16 +333,6 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   }, [cameraState, durationSecs]);
 
   // -------------------------------------------------------------------------
-  // Render helpers
-  // -------------------------------------------------------------------------
-
-  const progressPct = cameraState === 'ready'
-    ? ((durationSecs - timeLeft) / durationSecs) * 100
-    : 0;
-
-  const timerDone = isFightEnded || timeLeft <= 0;
-
-  // -------------------------------------------------------------------------
   // Render
   // -------------------------------------------------------------------------
 
@@ -357,24 +393,30 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         */}
         <canvas
           ref={canvasRef}
-          style={{ pointerEvents: 'none' }}
-          className={`absolute inset-0 w-full h-full transition-opacity duration-500 ${
-            cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
-          }`}
+          style={{
+            pointerEvents: 'none',
+            display: 'none',
+          }}
+          className={`absolute inset-0 w-full h-full transition-opacity duration-300 opacity-0 pointer-events-none`}
           aria-hidden="true"
         />
 
         {/* Live HUD telemetry badges (ready only) */}
         {cameraState === 'ready' && !isFightEnded && (
           <>
-            <div className="absolute top-4 left-6 pointer-events-none flex items-center gap-2 px-3 py-1 rounded bg-black/60 border border-neutral-800 text-[10px] font-mono uppercase tracking-widest text-neutral-300 backdrop-blur-sm">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>ROUND ACTIVE // POSE CV LOCK</span>
+            <div className="absolute top-4 left-6 pointer-events-none flex flex-col gap-2">
+              <div className="flex items-center gap-2 px-3 py-1 rounded bg-black/60 border border-neutral-800 text-[10px] font-mono uppercase tracking-widest text-neutral-300 backdrop-blur-sm">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span>{isPrepPhase ? 'PREPARATION // POSE CV LOCK' : 'ROUND ACTIVE // RECORDING'}</span>
+              </div>
             </div>
+
+            {/* Removed GUARD UP Overlay (0-2s) as requested */}
+
             {/* Mobile title fallback floating */}
             <div className="absolute top-16 left-6 pointer-events-none sm:hidden">
               <h1 className="text-2xl font-black uppercase tracking-tight leading-none">
-                <span className="text-white drop-shadow-[0_4px_15px_rgba(255,255,255,0.2)]">FIGHT</span> <span className="text-[#E10600] drop-shadow-[0_0_15px_rgba(225,6,0,0.8)]">ACTIVE</span>
+                <span className="text-white drop-shadow-[0_4px_15px_rgba(255,255,255,0.2)]">FIGHT</span> <span className="text-[#E10600] drop-shadow-[0_0_15px_rgba(225,6,0,0.8)]">{isPrepPhase ? 'PREP' : 'ACTIVE'}</span>
               </h1>
             </div>
           </>
@@ -432,15 +474,17 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         {/* Timer display */}
         <div className="flex items-baseline gap-3">
           <span className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">
-            Fight Time
+            {isPrepPhase ? 'GUARD PHASE' : 'FIGHT TIME'}
           </span>
           <span
             className={`text-4xl sm:text-5xl font-black font-mono tabular-nums leading-none transition-colors duration-300 ${
               timerDone
                 ? 'text-red-500'
-                : timeLeft <= 3
-                  ? 'text-amber-400'
-                  : 'text-white'
+                : isPrepPhase
+                  ? 'text-emerald-400'
+                  : timeLeft <= 3
+                    ? 'text-amber-400'
+                    : 'text-white'
             }`}
           >
             {formatTime(timeLeft)}
@@ -448,10 +492,12 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         </div>
 
         {/* Progress bar */}
-        <div className="w-full max-w-lg h-1 rounded-full bg-neutral-800 overflow-hidden">
+        <div className="w-full max-w-lg h-1 rounded-full bg-neutral-800 overflow-hidden relative">
           <div
-            className="h-full bg-red-600 rounded-full transition-all duration-1000 ease-linear"
-            style={{ width: `${progressPct}%` }}
+            className={`h-full rounded-full transition-all duration-1000 ease-linear ${
+              isPrepPhase ? 'bg-emerald-500' : 'bg-red-600'
+            }`}
+            style={{ width: `${fightProgressPct}%` }}
           />
         </div>
 

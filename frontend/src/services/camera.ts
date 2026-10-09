@@ -20,49 +20,40 @@ export const FRONT_STREAM_STATUS_URL =
 // Legacy alias pointing to backend shared stream
 export const PHONE1_STREAM_URL = FRONT_STREAM_URL;
 
+let inFlightProbe: Promise<boolean> | null = null;
+
 /**
  * Checks if the shared front camera stream from the backend is available.
- * Queries the backend non-blocking status endpoint first, with Image probe fallback.
+ * Queries the backend non-blocking status endpoint with deduplication and no duplicate streaming connections.
  */
 export async function checkPhone1StreamAvailable(): Promise<boolean> {
-  // 1. Fetch probe to backend status endpoint
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
-
-    const res = await fetch(FRONT_STREAM_STATUS_URL, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-    if (res.ok) {
-      const data = await res.json();
-      return Boolean(data.available);
-    }
-  } catch {
-    // Fall back to Image probe on backend stream
+  if (inFlightProbe) {
+    return inFlightProbe;
   }
 
-  // 2. Image element probe fallback on backend stream
-  return new Promise((resolve) => {
-    const img = new Image();
-    const timer = setTimeout(() => {
-      img.src = '';
-      resolve(false);
-    }, 2500);
+  inFlightProbe = (async () => {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 4000);
 
-    img.onload = () => {
-      clearTimeout(timer);
-      resolve(true);
-    };
+      const res = await fetch(FRONT_STREAM_STATUS_URL, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
 
-    img.onerror = () => {
-      clearTimeout(timer);
-      resolve(false);
-    };
+      clearTimeout(timeoutId);
+      if (res.ok) {
+        const data = await res.json();
+        return Boolean(data.available);
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      inFlightProbe = null;
+    }
+  })();
 
-    img.src = `${FRONT_STREAM_URL}?_probe=${Date.now()}`;
-  });
+  return inFlightProbe;
 }

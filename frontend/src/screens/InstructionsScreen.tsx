@@ -33,28 +33,22 @@ export const InstructionsScreen: React.FC<InstructionsScreenProps> = ({
 
   const instructions = [
     {
-      num: '1',
-      title: 'STAND IN THE BOX',
-      desc: 'Position yourself inside the marked octagon fight square.',
+      num: '01',
+      title: 'POSITIONING',
+      desc: 'Stay inside the marked square.',
       icon: '📐',
     },
     {
-      num: '2',
-      title: 'THROW NATURAL PUNCHES',
-      desc: 'Perform jabs, hooks, and combinations naturally toward the camera.',
+      num: '02',
+      title: 'MOVEMENT',
+      desc: 'Perform your fighting movements naturally.',
       icon: '🥊',
     },
     {
-      num: '3',
-      title: 'FIGHT FOR 10 SECONDS',
-      desc: 'Demonstrate your fighting style while the AR round timer is active.',
+      num: '03',
+      title: 'TIMING',
+      desc: 'You have 7 seconds.',
       icon: '⏱️',
-    },
-    {
-      num: '4',
-      title: 'GET YOUR AI FIGHTER TYPE',
-      desc: 'Receive AI kinematic analysis and discover your UFC fighter match.',
-      icon: '🧠',
     },
   ];
 
@@ -78,8 +72,8 @@ export const InstructionsScreen: React.FC<InstructionsScreenProps> = ({
               </p>
             </div>
 
-            {/* 4 Instruction Cards Grid */}
-            <div className="w-full grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* 3 Instruction Cards Grid */}
+            <div className="w-full grid grid-cols-1 sm:grid-cols-3 gap-4">
               {instructions.map((item, idx) => (
                 <div
                   key={item.num}
@@ -107,20 +101,12 @@ export const InstructionsScreen: React.FC<InstructionsScreenProps> = ({
               ))}
             </div>
 
-            {/* Ready Action Button */}
+            {/* Status Indicator */}
             <div className="pt-2 w-full flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs font-mono tracking-widest text-neutral-400 uppercase">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
                 <span>Round Armed • Ready</span>
               </div>
-
-              <button
-                type="button"
-                onClick={onComplete}
-                className="px-8 py-3.5 rounded-xl text-sm font-mono font-bold tracking-widest uppercase bg-[#E10600] hover:bg-red-700 text-white shadow-[0_0_30px_rgba(225,6,0,0.6)] transition-all cursor-pointer"
-              >
-                READY →
-              </button>
             </div>
 
           </div>

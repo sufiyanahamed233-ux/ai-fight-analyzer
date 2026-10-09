@@ -250,14 +250,6 @@ export const ReviewScreen: React.FC<ReviewScreenProps> = ({
               >
                 Reset ↺
               </button>
-
-              <button
-                type="button"
-                onClick={onNext}
-                className="px-7 py-3 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-widest uppercase bg-[#E10600] hover:bg-red-700 text-white shadow-[0_0_30px_rgba(225,6,0,0.6)] transition-all cursor-pointer"
-              >
-                Reveal Fighter Match →
-              </button>
             </div>
 
           </div>

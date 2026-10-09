@@ -48,7 +48,7 @@ router = APIRouter()
 
 DROIDCAM_URL = "http://127.0.0.1:4747/video"   # DroidCam MJPEG stream
 DROIDCAM_STATUS_URL = "http://127.0.0.1:4747"  # Used for availability probe
-LOCAL_CAM_INDEX = 0                              # Fallback: USB/built-in webcam
+LOCAL_CAM_INDEX = 1                              # Fallback: DroidCam camera index 1 (DroidCam Video)
 JPEG_QUALITY = 80
 TARGET_FPS = 30
 _FRAME_SLEEP = 1.0 / TARGET_FPS

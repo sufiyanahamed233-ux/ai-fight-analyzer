@@ -88,7 +88,7 @@ export default function App() {
 
       {currentState === ExhibitionState.FIGHT && (
         <LiveFightScreen
-          durationSecs={10}
+          durationSecs={7}
           onProcessing={handleFightProcessing}
           onComplete={handleFightComplete}
           onError={handleFightError}

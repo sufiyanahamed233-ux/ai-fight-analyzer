@@ -32,18 +32,24 @@ class RealApiService implements IApiService {
     onUpdate: (data: CalibrationResponse) => void
   ): () => void {
     let isCancelled = false;
+    let timerId: ReturnType<typeof setTimeout> | null = null;
+    let isReady = false;
 
     const checkStream = async () => {
+      if (isCancelled || isReady) return;
+
       try {
         const isAvailable = await checkPhone1StreamAvailable();
-        if (isCancelled) return;
+        if (isCancelled || isReady) return;
 
         if (isAvailable) {
+          isReady = true;
           onUpdate({
             status: CalibrationStatus.READY,
             person_detected: true,
             device_label: 'Phone 1 (MJPEG Stream)',
           });
+          return; // Stop polling once ready!
         } else {
           onUpdate({
             status: CalibrationStatus.DETECTING,
@@ -52,7 +58,7 @@ class RealApiService implements IApiService {
           });
         }
       } catch (err: unknown) {
-        if (!isCancelled) {
+        if (!isCancelled && !isReady) {
           const message =
             err instanceof Error
               ? err.message
@@ -64,14 +70,18 @@ class RealApiService implements IApiService {
           });
         }
       }
+
+      // Schedule next check sequentially after 1200ms
+      if (!isCancelled && !isReady) {
+        timerId = setTimeout(checkStream, 1200);
+      }
     };
 
     void checkStream();
-    const interval = setInterval(checkStream, 1500);
 
     return () => {
       isCancelled = true;
-      clearInterval(interval);
+      if (timerId) clearTimeout(timerId);
     };
   }
 
