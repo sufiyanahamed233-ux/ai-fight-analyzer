@@ -6,8 +6,8 @@ import { FireEmberSparks } from '../components/FighterSilhouettes';
 type CountdownLabel = '3' | '2' | '1' | 'FIGHT!';
 
 const SEQUENCE: CountdownLabel[] = ['3', '2', '1', 'FIGHT!'];
-const DIGIT_DURATION_MS = 1000;
-const FIGHT_DURATION_MS = 800;
+const DIGIT_DURATION_MS = 1500;
+const FIGHT_DURATION_MS = 1500;
 
 interface CountdownScreenProps {
   onComplete: () => void;
@@ -29,6 +29,15 @@ export const CountdownScreen: React.FC<CountdownScreenProps> = ({
   const [flash, setFlash] = useState<boolean>(false);
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+
+  useEffect(() => {
+    const audio = new Audio('/assets/audio/321fight.mp3');
+    audio.play().catch((err) => console.warn('Audio playback failed:', err));
+    return () => {
+      audio.pause();
+      audio.src = '';
+    };
+  }, []);
 
   useEffect(() => {
     const timers: ReturnType<typeof setTimeout>[] = [];

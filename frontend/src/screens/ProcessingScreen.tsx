@@ -10,7 +10,7 @@ interface ProcessingScreenProps {
   onReset: () => void;
 }
 
-const MIN_TOTAL_DISPLAY_MS = 2500;
+const MIN_TOTAL_DISPLAY_MS = 2000;
 const MIN_RESULT_DISPLAY_MS = 1000;
 
 /**
@@ -30,6 +30,15 @@ export const ProcessingScreen: React.FC<ProcessingScreenProps> = ({
   const mountTimeRef = useRef<number>(Date.now());
   const completedRef = useRef<boolean>(false);
   const onCompleteRef = useRef(onComplete);
+
+  useEffect(() => {
+    const audio = new Audio('/assets/audio/analyzing-fight.mp3');
+    audio.play().catch((err) => console.warn('Audio playback failed:', err));
+    return () => {
+      audio.pause();
+      audio.src = '';
+    };
+  }, []);
 
   useEffect(() => {
     onCompleteRef.current = onComplete;

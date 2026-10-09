@@ -31,21 +31,30 @@ export const CalibrationScreen: React.FC<CalibrationScreenProps> = ({
   onCompleteRef.current = onComplete;
 
   useEffect(() => {
-    let transitionTimer: ReturnType<typeof setTimeout> | null = null;
+    const audio = new Audio('/assets/audio/position-yourself.mp3');
+    audio.play().catch((err) => console.warn('Audio playback failed:', err));
+    return () => {
+      audio.pause();
+      audio.src = '';
+    };
+  }, []);
+
+  useEffect(() => {
+    let hasCompleted = false;
+    const timer = setTimeout(() => {
+      if (!hasCompleted) {
+        hasCompleted = true;
+        onCompleteRef.current();
+      }
+    }, 2000);
 
     const unsubscribe = apiService.subscribeCalibration((update) => {
       setData(update);
-
-      if (update.status === CalibrationStatus.READY) {
-        transitionTimer = setTimeout(() => {
-          onCompleteRef.current();
-        }, 1200);
-      }
     });
 
     return () => {
       unsubscribe();
-      if (transitionTimer) clearTimeout(transitionTimer);
+      clearTimeout(timer);
     };
   }, []);
 
