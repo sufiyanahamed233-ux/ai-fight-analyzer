@@ -15,16 +15,17 @@ import {
 } from './types/exhibition.ts';
 import type { FightObservationResult } from './types/analysis.ts';
 
-// Internal-only phase for the Dasara intro (not part of the public ExhibitionState enum)
+// Internal-only state for the Dasara intro (not part of the public ExhibitionState enum)
 type AppPhase = 'DASARA_INTRO' | ExhibitionState;
 
 export default function App() {
+  // Start with Dasara intro; it fires onComplete → WELCOME
   const [phase, setPhase] = useState<AppPhase>('DASARA_INTRO');
   const [analysisResult, setAnalysisResult] =
     useState<FightObservationResult | null>(null);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
 
-  const currentState = phase as ExhibitionState;
+  const currentState = phase as ExhibitionState; // safe after intro
 
   const goToState = useCallback((state: ExhibitionState) => {
     setPhase(state);
@@ -39,7 +40,7 @@ export default function App() {
   const handleFightComplete = useCallback(
     (result: FightObservationResult) => {
       setAnalysisResult(result);
-      goToState(ExhibitionState.REVIEW);
+      goToState(ExhibitionState.PROCESSING);
     },
     [goToState]
   );
@@ -52,7 +53,7 @@ export default function App() {
     setAnalysisError(error);
   }, []);
 
-  // Dasara intro rendered as full-viewport takeover before Welcome screen
+  // ── Dasara intro is rendered outside ExhibitionShell (full-viewport takeover) ──
   if (phase === 'DASARA_INTRO') {
     return (
       <DasaraIntroScreen
@@ -87,7 +88,7 @@ export default function App() {
 
       {currentState === ExhibitionState.FIGHT && (
         <LiveFightScreen
-          durationSecs={10}
+          durationSecs={7}
           onProcessing={handleFightProcessing}
           onComplete={handleFightComplete}
           onError={handleFightError}

@@ -66,7 +66,7 @@ export function DasaraIntroScreen({ onComplete }: Props) {
           style={{
             width: '100vw',
             height: '100vh',
-            objectFit: 'cover',
+            objectFit: 'contain',
             objectPosition: 'center',
             display: 'block',
           }}

@@ -160,22 +160,26 @@ class RecordingSession:
 
 def _open_capture(source: Union[int, str]) -> cv2.VideoCapture:  # type: ignore[name-defined]
     """Open camera source: MJPEG HTTP URL or camera index with DirectShow fallback."""
+    cap = None
     if isinstance(source, str) and (
         source.startswith("http://")
         or source.startswith("https://")
         or source.startswith("rtsp://")
     ):
-        return cv2.VideoCapture(source)
-
-    if isinstance(source, int) or (isinstance(source, str) and source.isdigit()):
+        cap = cv2.VideoCapture(source)
+    elif isinstance(source, int) or (isinstance(source, str) and source.isdigit()):
         idx = int(source)
         cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
         if not cap.isOpened():
             cap.release()
             cap = cv2.VideoCapture(idx)
-        return cap
+    else:
+        cap = cv2.VideoCapture(source)
 
-    return cv2.VideoCapture(source)
+    if cap is not None and cap.isOpened():
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    return cap
 
 
 def _run_camera_worker(

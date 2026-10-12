@@ -1,7 +1,9 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { apiService } from '../services/api.ts';
-import { checkPhone1StreamAvailable, FRONT_STREAM_URL } from '../services/camera.ts';
-import type { FightObservationResult } from '../types/analysis.ts';
+import React, { useEffect, useRef, useState } from 'react';
+import { useARGloveOverlay } from '../ar/useARGloveOverlay';
+import { apiService } from '../services/api';
+import { FRONT_STREAM_URL, checkPhone1StreamAvailable } from '../services/camera';
+import type { FightObservationResult } from '../types/analysis';
+import { CornerBrackets } from '../components/TelemetryOverlay';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -13,33 +15,17 @@ type CameraState =
   | 'denied'
   | 'unavailable';
 
-/**
- * Normalised wrist coordinates in the range [0, 1].
- *
- * x = 0 is the LEFT edge of the camera frame (before mirroring).
- * y = 0 is the TOP edge.
- *
- * The canvas draw function mirrors x so gloves align with the CSS-mirrored
- * video:  canvasX = (1 - norm.x) * canvasWidth
- *
- * When the real CV backend is wired in, replace MOCK_WRISTS with live values
- * (e.g. from a WebSocket message) using the same WristCoords shape.
- */
-interface WristCoords {
-  /** Normalised [0..1] horizontal position in the un-mirrored camera frame. */
-  x: number;
-  /** Normalised [0..1] vertical position. */
-  y: number;
-}
-
 interface LiveFightScreenProps {
-  /** Total fight duration in seconds (presentation-only timer). */
+  /** Total fight duration in seconds. */
   durationSecs?: number;
-  /** Invoked when backend analysis completes with the observation result. */
+  /**
+   * Called exactly once when the 10-second fight timer reaches zero.
+   * App.tsx uses this to transition FIGHT -> PROCESSING.
+   */
+  onFightComplete?: () => void;
+  /** Integration callbacks */
   onComplete?: (result: FightObservationResult) => void;
-  /** Invoked if the API request or camera recording returns an error. */
   onError?: (error: string) => void;
-  /** Invoked when the 10-second visual timer reaches 0 and the backend result has not arrived yet. */
   onProcessing?: () => void;
 }
 
@@ -47,17 +33,7 @@ interface LiveFightScreenProps {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_DURATION_SECS = 10;
-
-/**
- * MOCK wrist positions – temporary placeholder for Phase 8.
- * Replace with real CV-backend data in a later phase.
- * Coordinates are normalised (0→1) in the un-mirrored camera frame.
- */
-const MOCK_WRISTS: { left: WristCoords; right: WristCoords } = {
-  left:  { x: 0.40, y: 0.55 },
-  right: { x: 0.60, y: 0.55 },
-};
+const DEFAULT_DURATION_SECS = 7;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,210 +47,17 @@ function formatTime(totalSeconds: number): string {
 
 /**
  * Derive a human-readable message for each camera state.
+ * Raw browser error text is intentionally never shown to the participant.
  */
-function cameraErrorMessage(state: CameraState, customMessage?: string | null): string {
-  if (customMessage) return customMessage;
+function cameraErrorMessage(state: CameraState): string {
   switch (state) {
     case 'denied':
-      return 'Stream access was denied. Please check your browser settings.';
+      return 'Camera access was denied. Please allow camera permissions and try again.';
     case 'unavailable':
-      return `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running on Phone 1 and ADB forwarding is active.`;
+      return 'Camera is unavailable on this device. Please check your hardware and try again.';
     default:
-      return 'An unexpected error occurred with the camera stream.';
+      return 'An unexpected error occurred with the camera.';
   }
-}
-
-// ---------------------------------------------------------------------------
-// Canvas glove drawing
-// ---------------------------------------------------------------------------
-
-/**
- * Convert a normalised wrist coordinate to canvas pixel coordinates.
- *
- * The video element is CSS-mirrored (scaleX(-1)) so the participant sees their
- * hands on the "correct" side of the screen.  We apply the same horizontal
- * mirror here so the canvas gloves stay aligned:
- *
- *   canvasX = (1 - norm.x) * canvasWidth
- *   canvasY =       norm.y  * canvasHeight
- *
- * This mapping is the single authoritative place to update when real backend
- * wrist coordinates arrive.
- */
-function normToCanvas(
-  norm: WristCoords,
-  canvasWidth: number,
-  canvasHeight: number,
-): { cx: number; cy: number } {
-  return {
-    cx: (1 - norm.x) * canvasWidth,   // mirror x to match CSS scaleX(-1)
-    cy:       norm.y  * canvasHeight,
-  };
-}
-
-/**
- * Draw a stylised boxing glove centred at (cx, cy) on the given context.
- *
- * Geometry (no external images / assets):
- *  - Main body  : large rounded rectangle (the glove bulk)
- *  - Thumb bump : smaller ellipse on the inner side
- *  - Wrist cuff : flat rectangle below the main body
- *  - Highlight  : small semi-transparent arc for a 3-D sheen
- *
- * @param ctx        2-D rendering context
- * @param cx         centre-x of the glove on the canvas
- * @param cy         centre-y of the glove on the canvas
- * @param size       overall radius / scale unit (default ≈ 36)
- * @param isLeft     true → thumb on the right side, false → thumb on the left
- * @param fillColor  main glove colour
- */
-function drawGlove(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  size: number,
-  isLeft: boolean,
-  fillColor: string,
-): void {
-  const thumbSide = isLeft ? 1 : -1; // +1 = right, -1 = left
-
-  ctx.save();
-  ctx.translate(cx, cy);
-
-  // ----- Wrist cuff -----
-  const cuffW = size * 1.1;
-  const cuffH = size * 0.55;
-  const cuffY = size * 0.55;
-  ctx.beginPath();
-  ctx.roundRect(-cuffW / 2, cuffY, cuffW, cuffH, size * 0.15);
-  ctx.fillStyle = darken(fillColor, 0.25);
-  ctx.fill();
-
-  // Cuff horizontal seam line
-  ctx.beginPath();
-  ctx.moveTo(-cuffW / 2 + size * 0.1, cuffY + cuffH * 0.45);
-  ctx.lineTo( cuffW / 2 - size * 0.1, cuffY + cuffH * 0.45);
-  ctx.strokeStyle = 'rgba(255,255,255,0.18)';
-  ctx.lineWidth = size * 0.06;
-  ctx.stroke();
-
-  // ----- Main glove body -----
-  const bodyW = size * 1.25;
-  const bodyH = size * 1.1;
-  ctx.beginPath();
-  ctx.roundRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH, size * 0.38);
-  ctx.fillStyle = fillColor;
-  ctx.fill();
-
-  // Body outline
-  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-  ctx.lineWidth = size * 0.07;
-  ctx.stroke();
-
-  // ----- Thumb bump (ellipse on the inner/upper side) -----
-  const thumbX = thumbSide * (bodyW / 2 - size * 0.08);
-  const thumbY = -bodyH * 0.18;
-  ctx.beginPath();
-  ctx.ellipse(thumbX, thumbY, size * 0.28, size * 0.22, 0, 0, Math.PI * 2);
-  ctx.fillStyle = darken(fillColor, 0.12);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-  ctx.lineWidth = size * 0.06;
-  ctx.stroke();
-
-  // ----- Knuckle seam lines (horizontal across upper body) -----
-  const seamsY = [-bodyH * 0.18, bodyH * 0.05, bodyH * 0.26];
-  seamsY.forEach((sy) => {
-    ctx.beginPath();
-    ctx.moveTo(-bodyW * 0.36, sy);
-    ctx.lineTo( bodyW * 0.36, sy);
-    ctx.strokeStyle = 'rgba(0,0,0,0.22)';
-    ctx.lineWidth = size * 0.045;
-    ctx.stroke();
-  });
-
-  // ----- Highlight sheen (top-left arc) -----
-  ctx.beginPath();
-  ctx.arc(-bodyW * 0.18, -bodyH * 0.28, size * 0.32, Math.PI * 1.1, Math.PI * 1.7);
-  ctx.strokeStyle = 'rgba(255,255,255,0.28)';
-  ctx.lineWidth = size * 0.13;
-  ctx.stroke();
-
-  ctx.restore();
-}
-
-/** Darken a hex/rgb colour string by a fractional amount (0 = no change, 1 = black). */
-function darken(color: string, amount: number): string {
-  // Parse as hex shorthand or 6-digit
-  const hex = color.replace('#', '');
-  const full = hex.length === 3
-    ? hex.split('').map((c) => c + c).join('')
-    : hex;
-  const r = Math.round(parseInt(full.slice(0, 2), 16) * (1 - amount));
-  const g = Math.round(parseInt(full.slice(2, 4), 16) * (1 - amount));
-  const b = Math.round(parseInt(full.slice(4, 6), 16) * (1 - amount));
-  return `rgb(${r},${g},${b})`;
-}
-
-// ---------------------------------------------------------------------------
-// Glove overlay hook
-// ---------------------------------------------------------------------------
-
-/**
- * Manages the canvas overlay that renders virtual boxing gloves.
- *
- * - Uses a ResizeObserver to keep the canvas bitmap dimensions in sync with
- *   the container element's layout size.
- * - Re-draws whenever the canvas size changes.
- * - Entirely independent of the camera lifecycle; operates only on the canvas ref.
- */
-function useGloveOverlay(
-  canvasRef: React.RefObject<HTMLCanvasElement | null>,
-  containerRef: React.RefObject<HTMLDivElement | null>,
-  active: boolean,
-): void {
-  const drawGloves = useCallback((canvas: HTMLCanvasElement) => {
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const { width, height } = canvas;
-    ctx.clearRect(0, 0, width, height);
-
-    // Virtual boxing glove visuals disabled
-    if (false as boolean) {
-      const size = Math.min(width, height) * 0.065;
-      const left = normToCanvas(MOCK_WRISTS.left, width, height);
-      drawGlove(ctx, left.cx, left.cy, size, true, '#cc1a1a');
-      const right = normToCanvas(MOCK_WRISTS.right, width, height);
-      drawGlove(ctx, right.cx, right.cy, size, false, '#cc1a1a');
-    }
-  }, []);
-
-  useEffect(() => {
-    if (!active) return;
-
-    const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
-    const syncAndDraw = () => {
-      const { width, height } = container.getBoundingClientRect();
-      // Only update bitmap size when dimensions actually change (avoids flicker)
-      if (canvas.width !== Math.round(width) || canvas.height !== Math.round(height)) {
-        canvas.width  = Math.round(width);
-        canvas.height = Math.round(height);
-      }
-      drawGloves(canvas);
-    };
-
-    // Initial draw
-    syncAndDraw();
-
-    const observer = new ResizeObserver(syncAndDraw);
-    observer.observe(container);
-
-    return () => observer.disconnect();
-  }, [active, canvasRef, containerRef, drawGloves]);
 }
 
 // ---------------------------------------------------------------------------
@@ -282,164 +65,276 @@ function useGloveOverlay(
 // ---------------------------------------------------------------------------
 
 /**
- * LiveFightScreen – Phase 7 + Phase 8
+ * LiveFightScreen
  *
- * Phase 7: live camera feed via getUserMedia.
- * Phase 8: canvas overlay with mock virtual boxing gloves.
- *
- * Camera lifecycle:
- *  - Requests getUserMedia on mount.
- *  - Attaches the MediaStream to the <video> ref.
- *  - Stops every track in the cleanup function to release the device.
- *
- * Canvas overlay:
- *  - Positioned absolute, same bounds as the video.
- *  - pointer-events: none so it never blocks camera interaction.
- *  - ResizeObserver keeps canvas bitmap in sync with container layout.
- *  - Draws gloves only when cameraState === 'ready'.
- *
- * Timer lifecycle:
- *  - Starts only once the camera is "ready".
- *  - UI-only: does not gate any backend recording.
- *
- * Error handling:
- *  - NotAllowedError / PermissionDeniedError  -> 'denied'
- *  - Everything else                           -> 'unavailable'
+ * - Acquires Camera 1 via getUserMedia on mount.
+ * - Runs MediaPipe HandLandmarker and overlays photorealistic combat-sports gloves.
+ * - Runs the 10-second fight timer; upon completion immediately terminates camera,
+ *   cleans up MediaPipe resources, and calls onFightComplete() / onComplete() / onProcessing().
  */
 export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   durationSecs = DEFAULT_DURATION_SECS,
+  onFightComplete,
   onComplete,
   onError,
   onProcessing,
 }) => {
-  const canvasRef    = useRef<HTMLCanvasElement>(null);
-  const viewportRef  = useRef<HTMLDivElement>(null);
+  const videoRef          = useRef<HTMLVideoElement>(null);
+  const streamRef         = useRef<MediaStream | null>(null);
+  const canvasRef         = useRef<HTMLCanvasElement>(null);
+  const viewportRef       = useRef<HTMLDivElement>(null);
 
-  const [cameraState,       setCameraState]       = useState<CameraState>('requesting');
-  const [cameraCustomError, setCameraCustomError] = useState<string | null>(null);
-  const [streamSrc,         _setStreamSrc]        = useState<string>(FRONT_STREAM_URL);
-  const [timeLeft,          setTimeLeft]          = useState<number>(durationSecs);
-  const [timerDone,         setTimerDone]         = useState<boolean>(false);
-  const [apiError,          setApiError]          = useState<string | null>(null);
-  const [analysisResult,    setAnalysisResult]    = useState<FightObservationResult | null>(null);
+  // Guard refs to prevent duplicate callbacks & duplicate API triggers
+  const completedRef          = useRef<boolean>(false);
+  const hasTriggeredApiRef    = useRef<boolean>(false);
+  const timerReachedZeroRef   = useRef<boolean>(false);
+  const analysisResultRef     = useRef<FightObservationResult | null>(null);
 
-  const analysisTriggeredRef = useRef<boolean>(false);
-  const resultRef            = useRef<FightObservationResult | null>(null);
-  const onCompleteRef        = useRef(onComplete);
-  const onErrorRef           = useRef(onError);
-  const onProcessingRef      = useRef(onProcessing);
-
-  useEffect(() => {
-    onCompleteRef.current = onComplete;
-    onErrorRef.current = onError;
-    onProcessingRef.current = onProcessing;
-  });
+  // Callback refs to prevent stale closure issues inside async / interval handlers
+  const onFightCompleteRef = useRef(onFightComplete);
+  const onCompleteRef      = useRef(onComplete);
+  const onErrorRef         = useRef(onError);
+  const onProcessingRef    = useRef(onProcessing);
 
   useEffect(() => {
-    console.log('[LiveFightScreen] Mounted, streamSrc:', streamSrc);
-  }, [streamSrc]);
+    onFightCompleteRef.current = onFightComplete;
+    onCompleteRef.current      = onComplete;
+    onErrorRef.current         = onError;
+    onProcessingRef.current    = onProcessing;
+  }, [onFightComplete, onComplete, onError, onProcessing]);
 
-  // -------------------------------------------------------------------------
-  // Phone 1 MJPEG Stream verification
-  // -------------------------------------------------------------------------
+  const [cameraState, setCameraState] = useState<CameraState>('requesting');
+  const [timeLeft,    setTimeLeft]    = useState<number>(durationSecs);
+  const [isFightEnded, setIsFightEnded] = useState<boolean>(false);
+
   useEffect(() => {
     let cancelled = false;
+    let animId: number;
+    const videoEl = videoRef.current;
 
-    async function verifyStream() {
-      setCameraState('requesting');
-      setCameraCustomError(null);
+    async function startCamera() {
+      try {
+        // 1. Resilient readiness check (retry up to 4 times with backoff)
+        let isAvailable = false;
+        for (let attempt = 0; attempt < 4; attempt++) {
+          if (cancelled) return;
+          isAvailable = await checkPhone1StreamAvailable();
+          if (isAvailable) break;
+          await new Promise((r) => setTimeout(r, 600));
+        }
 
-      const available = await checkPhone1StreamAvailable();
-      if (cancelled) return;
+        if (cancelled) return;
 
-      if (available) {
+        // 2. Consume MJPEG stream into a hidden Image
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+
+          const timer = setTimeout(() => {
+            if (!settled) {
+              settled = true;
+              if (img.naturalWidth > 0 || isAvailable) {
+                resolve();
+              } else {
+                reject(new Error('Timed out waiting for MJPEG stream frame'));
+              }
+            }
+          }, 3500);
+
+          img.onload = () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              resolve();
+            }
+          };
+
+          img.onerror = () => {
+            if (!settled) {
+              settled = true;
+              clearTimeout(timer);
+              if (isAvailable) {
+                // If backend status was verified active, resolve and let canvas draw when frames arrive
+                resolve();
+              } else {
+                reject(new Error('Failed to load backend MJPEG stream'));
+              }
+            }
+          };
+
+          img.src = `${FRONT_STREAM_URL}?t=${Date.now()}`;
+        });
+
+        if (cancelled) return;
+
+        // 3. Draw Image to a hidden Canvas and capture it as a MediaStream
+        // This bridges the MJPEG endpoint to the <video> element expected by useARGloveOverlay
+        const hiddenCanvas = document.createElement('canvas');
+        hiddenCanvas.width = img.naturalWidth || 1280;
+        hiddenCanvas.height = img.naturalHeight || 720;
+        const ctx = hiddenCanvas.getContext('2d');
+
+        if (!ctx) {
+          throw new Error('Failed to get 2d context for hidden stream canvas');
+        }
+
+        const renderLoop = () => {
+          if (cancelled) return;
+          if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+            if (hiddenCanvas.width !== img.naturalWidth || hiddenCanvas.height !== img.naturalHeight) {
+              hiddenCanvas.width = img.naturalWidth;
+              hiddenCanvas.height = img.naturalHeight;
+            }
+            ctx.drawImage(img, 0, 0);
+          }
+          animId = requestAnimationFrame(renderLoop);
+        };
+        renderLoop();
+
+        // 4. Feed the captured stream to the video element
+        const stream = hiddenCanvas.captureStream(30);
+        streamRef.current = stream;
+
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          // Must play the video explicitly when piping a captured stream
+          await videoRef.current.play().catch(() => {});
+        }
+
         setCameraState('ready');
-      } else {
+      } catch (err: unknown) {
+        if (cancelled) return;
+        console.error('[LiveFightScreen] Camera acquisition error:', err);
         setCameraState('unavailable');
-        setCameraCustomError(
-          `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running on Phone 1.`
-        );
       }
     }
 
-    void verifyStream();
+    void startCamera();
 
     return () => {
       cancelled = true;
+      if (animId) cancelAnimationFrame(animId);
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+      }
+      if (videoEl) {
+        videoEl.srcObject = null;
+      }
     };
   }, []);
 
   // -------------------------------------------------------------------------
-  // Dual-camera backend recording + analysis trigger
-  // Called exactly once when the camera is ready.
+  // Trigger Backend Analysis ONCE when camera is ready
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (cameraState !== 'ready') return;
-    if (analysisTriggeredRef.current) return;
-    analysisTriggeredRef.current = true;
+    if (hasTriggeredApiRef.current) return;
+    hasTriggeredApiRef.current = true;
 
     apiService
       .analyzeFight({ duration_seconds: durationSecs })
-      .then((res) => {
-        resultRef.current = res;
-        setAnalysisResult(res);
-        // When backend returns, call onComplete(result)
-        onCompleteRef.current?.(res);
+      .then((result) => {
+        analysisResultRef.current = result;
+
+        // If the 10-second fight timer has already expired while the API call was running:
+        if (timerReachedZeroRef.current && !completedRef.current) {
+          completedRef.current = true;
+          onCompleteRef.current?.(result);
+        }
       })
       .catch((err: unknown) => {
-        const message =
-          err instanceof Error
-            ? err.message
-            : 'Dual-camera recording or fight analysis failed.';
-        setApiError(message);
+        const message = err instanceof Error ? err.message : String(err);
         onErrorRef.current?.(message);
       });
   }, [cameraState, durationSecs]);
 
   // -------------------------------------------------------------------------
-  // Glove canvas overlay (active only when camera is ready)
+  // Render helpers & Timeline Logic
   // -------------------------------------------------------------------------
-  useGloveOverlay(canvasRef, viewportRef, cameraState === 'ready');
+
+  const elapsedSecs = durationSecs - timeLeft;
+  const isPrepPhase = elapsedSecs < 2;
+  const timerDone = isFightEnded || timeLeft <= 0;
+  
+  // Progress bar represents the continuous 15s duration (0s to 15s)
+  const fightProgressPct = cameraState === 'ready'
+    ? ((durationSecs - timeLeft) / durationSecs) * 100
+    : 0;
 
   // -------------------------------------------------------------------------
-  // Presentation-only fight timer – starts after camera is ready
+  // AR Glove canvas overlay (Three.js WebGL with 2D PNG fallback)
+  // -------------------------------------------------------------------------
+  useARGloveOverlay(
+    canvasRef,
+    viewportRef,
+    videoRef,
+    false,
+  );
+
+  // -------------------------------------------------------------------------
+  // Exact 10-Second Fight Timer + Single-Fire Completion Lifecycle
   // -------------------------------------------------------------------------
   useEffect(() => {
     if (cameraState !== 'ready') return;
 
-    setTimeLeft(durationSecs);
-    setTimerDone(false);
+    let timerId: ReturnType<typeof setInterval> | null = null;
+    const fightStart = Date.now();
+    const durationMs = durationSecs * 1000;
 
-    const interval = setInterval(() => {
-      setTimeLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          setTimerDone(true);
+    const stopFight = () => {
+      if (timerId !== null) {
+        clearInterval(timerId);
+        timerId = null;
+      }
+      timerReachedZeroRef.current = true;
+      setIsFightEnded(true);
 
-          // When the frontend timer reaches 0:
-          if (!resultRef.current) {
-            // Show processing if backend result has not arrived yet
-            onProcessingRef.current?.();
-          } else {
-            // Backend result has already arrived
-            onCompleteRef.current?.(resultRef.current);
-          }
-          return 0;
+      // 1. Immediately stop camera tracks
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+
+      // 2. Trigger legacy parent transition callback
+      onFightCompleteRef.current?.();
+
+      // 3. Handle integration flow:
+      // If analysis result has already arrived, call onComplete immediately.
+      // Otherwise, call onProcessing to signal the parent component.
+      if (analysisResultRef.current) {
+        if (!completedRef.current) {
+          completedRef.current = true;
+          onCompleteRef.current?.(analysisResultRef.current);
         }
-        return prev - 1;
-      });
-    }, 1000);
+      } else {
+        onProcessingRef.current?.();
+      }
+    };
 
-    return () => clearInterval(interval);
+    const tick = () => {
+      const elapsed = Date.now() - fightStart;
+      const remainingSecs = Math.max(0, Math.ceil((durationMs - elapsed) / 1000));
+      setTimeLeft(remainingSecs);
+
+      if (elapsed >= durationMs || remainingSecs <= 0) {
+        stopFight();
+      }
+    };
+
+    timerId = setInterval(tick, 100);
+
+    return () => {
+      if (timerId !== null) {
+        clearInterval(timerId);
+      }
+    };
   }, [cameraState, durationSecs]);
-
-  // -------------------------------------------------------------------------
-  // Render helpers
-  // -------------------------------------------------------------------------
-
-  const progressPct = cameraState === 'ready'
-    ? ((durationSecs - timeLeft) / durationSecs) * 100
-    : 0;
 
   // -------------------------------------------------------------------------
   // Render
@@ -451,9 +346,15 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
       {/* ── Top HUD ── */}
       <div className="flex items-center justify-between px-5 py-3 bg-neutral-950/90 border-b border-neutral-800/70">
         {/* Stage badge */}
-        <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-[10px] sm:text-xs font-mono uppercase tracking-[0.25em] text-neutral-400">
-          <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
-          <span>Stage 05 // Fight</span>
+        <div className="flex items-center gap-4">
+          <div className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full bg-neutral-900 border border-neutral-800 text-[10px] sm:text-xs font-mono uppercase tracking-[0.25em] text-neutral-400">
+            <span className="w-2 h-2 rounded-full bg-red-600 animate-pulse" />
+            <span>Stage 05 // Fight</span>
+          </div>
+          
+          <h1 className="text-xl sm:text-2xl font-black uppercase tracking-tight leading-none hidden sm:block">
+            <span className="text-white drop-shadow-[0_4px_15px_rgba(255,255,255,0.2)]">FIGHT</span> <span className="text-[#E10600] drop-shadow-[0_0_15px_rgba(225,6,0,0.8)]">ACTIVE</span>
+          </h1>
         </div>
 
         {/* Camera 1 live label */}
@@ -465,52 +366,65 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
       {/* ── Camera Viewport ── */}
       {/*
-        ref={viewportRef} is used by useGloveOverlay's ResizeObserver to
+        ref={viewportRef} is used by useARGloveOverlay's ResizeObserver to
         keep the canvas bitmap dimensions in sync with layout.
       */}
       <div
         ref={viewportRef}
-        className="relative flex-1 bg-black flex items-center justify-center overflow-hidden"
+        className="relative flex-1 bg-black flex items-center justify-center overflow-hidden border-y border-red-900/40 shadow-[inset_0_0_80px_rgba(220,38,38,0.2)]"
       >
+        <CornerBrackets />
 
-        {/* Live Phone 1 MJPEG stream – CSS-mirrored so the participant sees themselves correctly */}
-        <img
-          src={streamSrc}
-          alt="Live fight camera feed from Phone 1"
-          onLoad={() => {
-            console.log('[LiveFightScreen] img onLoad fired for:', streamSrc);
-            setCameraState('ready');
-            setCameraCustomError(null);
-          }}
-          onError={(e) => {
-            console.error('[LiveFightScreen] img onError fired for:', streamSrc, e);
-            setCameraState('unavailable');
-            setCameraCustomError(
-              `Phone 1 live stream offline at ${FRONT_STREAM_URL}. Please ensure DroidCam is running.`
-            );
-          }}
+        {/* Live video feed – CSS-mirrored so the participant sees themselves correctly */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
           style={{ transform: 'scaleX(-1)' }}
-          className={`w-full h-full object-contain aspect-video transition-opacity duration-500 ${
+          className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-500 ${
             cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
           }`}
-          aria-label="Live fight camera feed from Phone 1"
+          aria-label="Live fight camera feed"
         />
 
         {/*
           ── Canvas Glove Overlay ──
           - absolute + inset-0 → same bounds as the video.
           - pointer-events: none → never blocks interaction.
-          - The bitmap size is kept in sync via useGloveOverlay / ResizeObserver.
+          - The bitmap size is kept in sync via useARGloveOverlay / ResizeObserver.
           - Only visible when camera is ready.
         */}
         <canvas
           ref={canvasRef}
-          style={{ pointerEvents: 'none' }}
-          className={`absolute inset-0 w-full h-full transition-opacity duration-500 ${
-            cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
-          }`}
+          style={{
+            pointerEvents: 'none',
+            display: 'none',
+          }}
+          className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-300 opacity-0 pointer-events-none`}
           aria-hidden="true"
         />
+
+        {/* Live HUD telemetry badges (ready only) */}
+        {cameraState === 'ready' && !isFightEnded && (
+          <>
+            <div className="absolute top-4 left-6 pointer-events-none flex flex-col gap-2">
+              <div className="flex items-center gap-2 px-3 py-1 rounded bg-black/60 border border-neutral-800 text-[10px] font-mono uppercase tracking-widest text-neutral-300 backdrop-blur-sm">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span>{isPrepPhase ? 'PREPARATION // POSE CV LOCK' : 'ROUND ACTIVE // RECORDING'}</span>
+              </div>
+            </div>
+
+            {/* Removed GUARD UP Overlay (0-2s) as requested */}
+
+            {/* Mobile title fallback floating */}
+            <div className="absolute top-16 left-6 pointer-events-none sm:hidden">
+              <h1 className="text-2xl font-black uppercase tracking-tight leading-none">
+                <span className="text-white drop-shadow-[0_4px_15px_rgba(255,255,255,0.2)]">FIGHT</span> <span className="text-[#E10600] drop-shadow-[0_0_15px_rgba(225,6,0,0.8)]">{isPrepPhase ? 'PREP' : 'ACTIVE'}</span>
+              </h1>
+            </div>
+          </>
+        )}
 
         {/* ── Requesting overlay ── */}
         {cameraState === 'requesting' && (
@@ -534,41 +448,11 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             </div>
             <div className="space-y-3 max-w-sm">
               <p className="text-white font-black uppercase tracking-wide text-xl">
-                {cameraState === 'denied' ? 'Stream Access Denied' : 'Phone 1 Offline'}
+                Camera Unavailable
               </p>
               <p className="text-neutral-400 font-mono text-sm leading-relaxed">
-                {cameraErrorMessage(cameraState, cameraCustomError)}
+                {cameraErrorMessage(cameraState)}
               </p>
-            </div>
-          </div>
-        )}
-
-        {/* ── Processing telemetry overlay (timer reached 0 while waiting for backend) ── */}
-        {timerDone && !analysisResult && !apiError && (
-          <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-neutral-950/80 backdrop-blur-sm">
-            <div className="relative flex items-center justify-center w-16 h-16">
-              <div className="absolute inset-0 rounded-full border-2 border-red-500/30 animate-ping" />
-              <div className="w-12 h-12 rounded-full border-2 border-dashed border-red-500/80 animate-spin" />
-              <div className="w-3.5 h-3.5 rounded-full bg-red-600" />
-            </div>
-            <div className="text-center space-y-1 px-4">
-              <p className="text-white font-mono text-xs uppercase tracking-[0.25em] font-bold">
-                Processing Telemetry…
-              </p>
-              <p className="text-neutral-400 font-mono text-[11px]">
-                Computing dual-camera pose kinematics and movement features
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* ── API / Recording Error Banner ── */}
-        {apiError && (
-          <div className="absolute bottom-4 inset-x-6 z-30 flex items-center justify-between p-3.5 rounded-xl bg-red-950/90 border border-red-700/80 text-red-200 text-xs font-mono shadow-2xl backdrop-blur-sm">
-            <div className="flex items-center gap-2.5">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-              <span className="font-semibold">Analysis Error:</span>
-              <span className="text-red-300">{apiError}</span>
             </div>
           </div>
         )}
@@ -594,15 +478,17 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         {/* Timer display */}
         <div className="flex items-baseline gap-3">
           <span className="text-[10px] font-mono uppercase tracking-widest text-neutral-500">
-            Fight Time
+            {isPrepPhase ? 'GUARD PHASE' : 'FIGHT TIME'}
           </span>
           <span
             className={`text-4xl sm:text-5xl font-black font-mono tabular-nums leading-none transition-colors duration-300 ${
               timerDone
                 ? 'text-red-500'
-                : timeLeft <= 3
-                  ? 'text-amber-400'
-                  : 'text-white'
+                : isPrepPhase
+                  ? 'text-emerald-400'
+                  : timeLeft <= 3
+                    ? 'text-amber-400'
+                    : 'text-white'
             }`}
           >
             {formatTime(timeLeft)}
@@ -610,16 +496,18 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
         </div>
 
         {/* Progress bar */}
-        <div className="w-full max-w-lg h-1 rounded-full bg-neutral-800 overflow-hidden">
+        <div className="w-full max-w-lg h-1 rounded-full bg-neutral-800 overflow-hidden relative">
           <div
-            className="h-full bg-red-600 rounded-full transition-all duration-1000 ease-linear"
-            style={{ width: `${progressPct}%` }}
+            className={`h-full rounded-full transition-all duration-1000 ease-linear ${
+              isPrepPhase ? 'bg-emerald-500' : 'bg-red-600'
+            }`}
+            style={{ width: `${fightProgressPct}%` }}
           />
         </div>
 
         {timerDone && (
           <p className="text-xs font-mono uppercase tracking-widest text-red-400 animate-pulse">
-            Time&rsquo;s up
+            Fight Over
           </p>
         )}
       </div>

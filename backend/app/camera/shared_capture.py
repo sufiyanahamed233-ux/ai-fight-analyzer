@@ -448,7 +448,7 @@ class SharedFrontCaptureManager:
                         b"Content-Length: " + str(len(jpeg)).encode("ascii") + b"\r\n\r\n"
                     )
                     yield header + jpeg + b"\r\n"
-                await asyncio.sleep(1.0 / 30.0)
+                await asyncio.sleep(0.01)
         except (asyncio.CancelledError, GeneratorExit):
             pass
 
