@@ -79,10 +79,14 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   onError,
   onProcessing,
 }) => {
-  const videoRef          = useRef<HTMLVideoElement>(null);
+  const imageRef          = useRef<HTMLImageElement | null>(null);
+  const videoRef          = useRef<HTMLVideoElement | null>(null);
   const streamRef         = useRef<MediaStream | null>(null);
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const viewportRef       = useRef<HTMLDivElement>(null);
+  const animFrameIdRef    = useRef<number | null>(null);
+  const isStartingCameraRef = useRef<boolean>(false);
+  const isStreamActiveRef   = useRef<boolean>(false);
 
   // Guard refs to prevent duplicate callbacks & duplicate API triggers
   const completedRef          = useRef<boolean>(false);
@@ -107,12 +111,43 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
   const [timeLeft,    setTimeLeft]    = useState<number>(durationSecs);
   const [isFightEnded, setIsFightEnded] = useState<boolean>(false);
 
+  const cleanupStream = () => {
+    isStartingCameraRef.current = false;
+    isStreamActiveRef.current = false;
+
+    if (animFrameIdRef.current !== null) {
+      cancelAnimationFrame(animFrameIdRef.current);
+      animFrameIdRef.current = null;
+    }
+
+    const imgEl = imageRef.current;
+    if (imgEl) {
+      imgEl.onload = null;
+      imgEl.onerror = null;
+      imgEl.src = '';
+      imgEl.removeAttribute('src');
+    }
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
-    let animId: number;
-    const videoEl = videoRef.current;
 
     async function startCamera() {
+      // Prevent duplicate initialization if startCamera is called more than once
+      if (isStartingCameraRef.current || isStreamActiveRef.current) {
+        return;
+      }
+      isStartingCameraRef.current = true;
+
       try {
         // 1. Resilient readiness check (retry up to 4 times with backoff)
         let isAvailable = false;
@@ -125,17 +160,26 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
         if (cancelled) return;
 
-        // 2. Consume MJPEG stream into a hidden Image
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
+        if (!isAvailable) {
+          setCameraState('unavailable');
+          isStartingCameraRef.current = false;
+          return;
+        }
 
+        const imgEl = imageRef.current;
+        if (!imgEl) {
+          isStartingCameraRef.current = false;
+          return;
+        }
+
+        // 2. Direct MJPEG stream into tracked <img> element
         await new Promise<void>((resolve, reject) => {
           let settled = false;
 
           const timer = setTimeout(() => {
             if (!settled) {
               settled = true;
-              if (img.naturalWidth > 0 || isAvailable) {
+              if (imgEl.naturalWidth > 0 || isAvailable) {
                 resolve();
               } else {
                 reject(new Error('Timed out waiting for MJPEG stream frame'));
@@ -143,7 +187,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             }
           }, 3500);
 
-          img.onload = () => {
+          imgEl.onload = () => {
             if (!settled) {
               settled = true;
               clearTimeout(timer);
@@ -151,12 +195,11 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             }
           };
 
-          img.onerror = () => {
+          imgEl.onerror = () => {
             if (!settled) {
               settled = true;
               clearTimeout(timer);
               if (isAvailable) {
-                // If backend status was verified active, resolve and let canvas draw when frames arrive
                 resolve();
               } else {
                 reject(new Error('Failed to load backend MJPEG stream'));
@@ -164,50 +207,33 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
             }
           };
 
-          img.src = `${FRONT_STREAM_URL}?t=${Date.now()}`;
+          imgEl.src = `${FRONT_STREAM_URL}?t=${Date.now()}`;
         });
 
-        if (cancelled) return;
-
-        // 3. Draw Image to a hidden Canvas and capture it as a MediaStream
-        // This bridges the MJPEG endpoint to the <video> element expected by useARGloveOverlay
-        const hiddenCanvas = document.createElement('canvas');
-        hiddenCanvas.width = img.naturalWidth || 1280;
-        hiddenCanvas.height = img.naturalHeight || 720;
-        const ctx = hiddenCanvas.getContext('2d');
-
-        if (!ctx) {
-          throw new Error('Failed to get 2d context for hidden stream canvas');
+        if (cancelled) {
+          cleanupStream();
+          return;
         }
 
-        const renderLoop = () => {
-          if (cancelled) return;
-          if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-            if (hiddenCanvas.width !== img.naturalWidth || hiddenCanvas.height !== img.naturalHeight) {
-              hiddenCanvas.width = img.naturalWidth;
-              hiddenCanvas.height = img.naturalHeight;
+        // Remove the one-off onload handler now that stream is established
+        if (imgEl) {
+          imgEl.onload = null;
+          imgEl.onerror = () => {
+            if (!cancelled) {
+              console.warn('[LiveFightScreen] MJPEG stream disconnected.');
             }
-            ctx.drawImage(img, 0, 0);
-          }
-          animId = requestAnimationFrame(renderLoop);
-        };
-        renderLoop();
-
-        // 4. Feed the captured stream to the video element
-        const stream = hiddenCanvas.captureStream(30);
-        streamRef.current = stream;
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          // Must play the video explicitly when piping a captured stream
-          await videoRef.current.play().catch(() => {});
+          };
         }
 
+        isStreamActiveRef.current = true;
+        isStartingCameraRef.current = false;
         setCameraState('ready');
       } catch (err: unknown) {
         if (cancelled) return;
         console.error('[LiveFightScreen] Camera acquisition error:', err);
         setCameraState('unavailable');
+        isStartingCameraRef.current = false;
+        isStreamActiveRef.current = false;
       }
     }
 
@@ -215,14 +241,7 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
 
     return () => {
       cancelled = true;
-      if (animId) cancelAnimationFrame(animId);
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
-        streamRef.current = null;
-      }
-      if (videoEl) {
-        videoEl.srcObject = null;
-      }
+      cleanupStream();
     };
   }, []);
 
@@ -292,14 +311,8 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
       timerReachedZeroRef.current = true;
       setIsFightEnded(true);
 
-      // 1. Immediately stop camera tracks
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-        streamRef.current = null;
-      }
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
+      // 1. Immediately close camera preview and release stream
+      cleanupStream();
 
       // 2. Trigger legacy parent transition callback
       onFightCompleteRef.current?.();
@@ -375,12 +388,10 @@ export const LiveFightScreen: React.FC<LiveFightScreenProps> = ({
       >
         <CornerBrackets />
 
-        {/* Live video feed – CSS-mirrored so the participant sees themselves correctly */}
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
+        {/* Live MJPEG stream feed – CSS-mirrored so the participant sees themselves correctly */}
+        <img
+          ref={imageRef}
+          alt="Live fight camera feed"
           style={{ transform: 'scaleX(-1)' }}
           className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-500 ${
             cameraState === 'ready' ? 'opacity-100' : 'opacity-0'
